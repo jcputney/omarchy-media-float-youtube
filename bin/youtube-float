@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# youtube-float — browse YouTube and play a video in the floating, pinned
+# overlay that follows you across every Hyprland workspace.
+#
+#   youtube-float browse           continue watching, subscriptions, search…
+#   youtube-float play <id|url>    play one video
+#   youtube-float quality <q>      720 | best | toggle (restarts the video)
+#   youtube-float auth             report whether the saved cookies are signed in
+#
+# Hide/show, resize and close are shared with the other overlays: see
+# `float-overlay`.
+#
+# Search and channel browsing work signed out. The personal sections need
+# YouTube cookies in ~/.config/youtube-float/cookies.txt — `auth` explains how.
+
+set -euo pipefail
+
+SELF="$(readlink -f "$0")"
+APP_ID="YouTubeFloat"
+OVERLAY_APP_NAME="YouTube"
+# The overlay picker is this tool's own Omarchy plugin. Absent or
+# disabled, the menus fall back to ghostty+fzf.
+: "${FLOAT_PICKER_PLUGIN_ID:=io.github.jcputney.media-float-youtube}"
+export FLOAT_PICKER_PLUGIN_ID
+# shellcheck source=/dev/null
+source "$HOME/.local/lib/float-overlay.sh"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/youtube-float"
+COOKIES="$CONFIG_DIR/cookies.txt"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/youtube-float"
+MENU="$CACHE_DIR/menu.tsv"
+QUALITY_FILE="$CONFIG_DIR/quality"
+
+DEFAULT_HEIGHT=720
+FEED_LIMIT="${YT_FEED_LIMIT:-40}"
+UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+
+mkdir -p "$CONFIG_DIR" "$CACHE_DIR"
+
+# ── yt-dlp ──────────────────────────────────────────────────────────────────
+
+ytdl() { # ytdl <url> [extra yt-dlp args…]; echoes the flat-playlist JSON
+  local url="$1"; shift
+  local jar=()
+  if [[ -s $COOKIES ]]; then
+    # yt-dlp writes the jar back over the file it is given, and YouTube's
+    # session rotation would then invalidate the saved copy. Hand it a throwaway.
+    install -m 600 "$COOKIES" "$RUN_DIR/yt-cookies.txt"
+    jar=(--cookies "$RUN_DIR/yt-cookies.txt")
+  fi
+  yt-dlp "${jar[@]}" --flat-playlist --no-warnings --ignore-errors \
+    --playlist-end "$FEED_LIMIT" -J "$@" "$url" 2>/dev/null
+}
+
+signed_in() {
+  [[ -s $COOKIES ]] || return 1
+  # grep -q stops at the first match, which closes the pipe and kills curl with
+  # SIGPIPE. Under `set -o pipefail` that failure would sink the whole pipeline
+  # even though the match succeeded, so report signed out for a signed-in
+  # account. Take the pipeline's status from grep alone.
+  local ok
+  set +o pipefail
+  curl -sS --compressed --max-time 30 -b "$COOKIES" -A "$UA" \
+    "https://www.youtube.com/feed/subscriptions" 2>/dev/null \
+    | grep -qm1 '"LOGGED_IN":true'
+  ok=$?
+  set -o pipefail
+  return "$ok"
+}
+
+# ── Rows ────────────────────────────────────────────────────────────────────
+# The shared picker wants <display>\t<thumb>\t<info>\t<action>\t<value…>.
+# Line breaks inside the info column travel as U+001F: jq's @tsv escapes
+# backslashes, so a "\n" would arrive as a literal backslash-n.
+
+JQ_DEFS='
+  def clean: (. // "") | gsub("[\t\n\r]"; " ");
+  def hms: (. // 0 | floor)
+           | if . >= 3600 then ((./3600|floor)|tostring) + "h " + ((./60%60|floor)|tostring) + "m"
+             elif . >= 60 then ((./60|floor)|tostring) + "m " + ((.%60)|tostring) + "s"
+             else (tostring) + "s" end;
+  def compact: if . == null then ""
+               elif . >= 1000000 then ((. / 100000 | floor) / 10 | tostring) + "M"
+               elif . >= 1000 then ((. / 1000 | floor) | tostring) + "K"
+               else (tostring) end;
+  def thumb: (.thumbnails // []) | map(select(.url != null)) | (last // {}) | (.url // "-");
+'
+
+# A channel's own videos tab leaves the uploader off each entry, because the
+# whole tab belongs to one channel; fall back to the tab's own channel name.
+# The watch-history feed carries no channel at all — the field is there but
+# always null — so those rows are titles only.
+JQ_VIDEOS="$JQ_DEFS"'
+  . as $feed
+  | (($feed.channel // $feed.uploader // "")|clean) as $owner
+  | .entries[]? | select(.id != null and (.title // "") != "")
+  | ((.channel // .uploader // $owner // "") | clean) as $by
+  | [ $prefix + "  " + (.title|clean)
+      + (if $by == "" then "" else "   —   " + $by end),
+      thumb,
+      ( (.title|clean)
+        + (if $by == "" then "\u001f" else "\u001f" + $by end)
+        + (if .duration then "  ·  " + (.duration|hms) else "" end)
+        + (if .view_count then "  ·  " + (.view_count|compact) + " views" else "" end)
+        + (if (.live_status // "") == "is_live" then "  ·  LIVE" else "" end)
+        + "\u001f\u001f" + (.description|clean) ),
+      "play", .id, (.title|clean) ] | @tsv'
+
+JQ_CHANNELS="$JQ_DEFS"'
+  .entries[]? | select(.id != null)
+  | [ "📺  " + ((.title // .channel // .id)|clean),
+      thumb,
+      ( ((.title // .channel // .id)|clean)
+        + (if .channel_follower_count
+           then "\u001f" + (.channel_follower_count|compact) + " subscribers"
+           else "" end)
+        + "\u001f\u001f" + (.description|clean) ),
+      "channel", .id ] | @tsv'
+
+JQ_PLAYLISTS="$JQ_DEFS"'
+  .entries[]? | select(.id != null)
+  | [ "📂  " + ((.title // .id)|clean),
+      thumb,
+      ( ((.title // .id)|clean)
+        + (if .playlist_count
+           then "\u001f" + (.playlist_count|tostring) + " videos"
+           else "" end)
+        + "\u001f\u001f" + (.description|clean) ),
+      "playlist", .id ] | @tsv'
+
+nav_row() { printf '%s\t-\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"; }
+
+feed_rows() { # feed_rows <url> <jq-program> [row-limit] [row-prefix]
+  local url="$1" prog="$2"
+  ytdl "$url" ${3:+--playlist-end "$3"} \
+    | jq -r --arg prefix "${4:-▸}" "$prog" 2>/dev/null || true
+}
+
+# Watch Later first, then whatever you left partway through. YouTube exposes
+# neither list without cookies, so both come back empty when signed out.
+continue_rows() {
+  # Distinct prefixes, because the two lists run together in one flat list and
+  # "saved for later" and "already started" are not the same thing.
+  feed_rows "https://www.youtube.com/playlist?list=WL" "$JQ_VIDEOS" 15 "⏱"
+  feed_rows "https://www.youtube.com/feed/history" "$JQ_VIDEOS" 15 "↺"
+}
+
+# ── Menus ───────────────────────────────────────────────────────────────────
+
+tui_main_rows() {
+  # Without cookies the personal feeds all come back empty, and asking YouTube
+  # for six of them would stall the menu for no reason. Offer the sign-in help
+  # instead.
+  if [[ -s $COOKIES ]]; then
+    continue_rows
+    nav_row "📥  Subscriptions"       "Recent uploads from every channel you follow." menu subscriptions
+    nav_row "🔥  Recommended for you" "Your YouTube home feed."                       menu recommended
+    nav_row "📂  Your playlists"      "Playlists you saved or created."               menu playlists
+    nav_row "📺  Your channels"       "Every channel you subscribe to."               menu channels
+  else
+    nav_row "⚠   Sign in to see your feeds" \
+      "Subscriptions, Recommended, Watch Later, history and your playlists all need YouTube cookies. Choose this row to print the steps." \
+      menu signin
+  fi
+  # YouTube retired /feed/trending in 2025 and the playlist that replaced it is
+  # a frozen 2024 snapshot, so there is no "popular now" row worth showing.
+  nav_row "🔍  Search YouTube…"     "Search all of YouTube by keyword. Works signed out." menu search
+}
+
+tui_submenu() { # tui_submenu <which>
+  case "$1" in
+    subscriptions) feed_rows "https://www.youtube.com/feed/subscriptions" "$JQ_VIDEOS" > "$MENU" ;;
+    recommended)   feed_rows "https://www.youtube.com/feed/recommended"   "$JQ_VIDEOS" > "$MENU" ;;
+    playlists)     feed_rows "https://www.youtube.com/feed/playlists"     "$JQ_PLAYLISTS" > "$MENU" ;;
+    channels)      feed_rows "https://www.youtube.com/feed/channels"      "$JQ_CHANNELS" > "$MENU" ;;
+    signin) emit "!auth"; return 0 ;;
+    search)
+      local q; q="$(ask "Search YouTube…")"
+      [[ -n $q ]] || return 1
+      feed_rows "ytsearch${FEED_LIMIT}:$q" "$JQ_VIDEOS" > "$MENU"
+      ;;
+  esac
+  [[ -s $MENU ]] || { emit "!empty $1"; return 1; }
+  tui_route "$(pick "$MENU" "YouTube")"
+}
+
+tui_route() { # tui_route "<action>\t<value>[\t<title>]"
+  local action value title
+  [[ -n ${1:-} ]] || return 1
+  IFS=$'\t' read -r action value title <<< "$1"
+  case "$action" in
+    play) emit "$value"$'\t'"${title:-YouTube}" ;;
+    menu) tui_submenu "$value" ;;
+    channel)
+      feed_rows "https://www.youtube.com/channel/$value/videos" "$JQ_VIDEOS" > "$MENU"
+      [[ -s $MENU ]] || return 1
+      tui_route "$(pick "$MENU" "YouTube")"
+      ;;
+    playlist)
+      feed_rows "https://www.youtube.com/playlist?list=$value" "$JQ_VIDEOS" > "$MENU"
+      [[ -s $MENU ]] || return 1
+      tui_route "$(pick "$MENU" "YouTube")"
+      ;;
+  esac
+}
+
+cmd_browse_tui() {
+  tui_main_rows > "$MENU"
+  tui_route "$(pick "$MENU" "YouTube")" || true
+}
+
+cmd_browse() {
+  local picked id title
+  picked="$(run_menu "$SELF _browse_tui")"
+  [[ -n $picked ]] || exit 0
+
+  [[ $picked == "!auth" ]] && { cmd_auth; exit 0; }
+
+  # An empty personal feed nearly always means the cookies are not signed in.
+  if [[ $picked == '!empty '* ]]; then
+    case "${picked#!empty }" in
+      search) die "Nothing came back for that." ;;
+      *) die "That section is empty — run 'youtube-float auth' to check your sign-in." ;;
+    esac
+  fi
+
+  IFS=$'\t' read -r id title <<< "$picked"
+  [[ -n $id ]] || exit 0
+  stop_existing
+  setsid -f "$0" _session "$id" "${title:-YouTube}" >> "$LOG" 2>&1
+  note "Opening ${title:-that video}…"
+}
+
+# ── Playback ────────────────────────────────────────────────────────────────
+
+height() { cat "$QUALITY_FILE" 2>/dev/null || echo "$DEFAULT_HEIGHT"; }
+
+ytdl_format() {
+  local h; h="$(height)"
+  if [[ $h == "best" ]]; then
+    printf '%s' "bestvideo+bestaudio/best"
+  else
+    printf 'bestvideo[height<=?%s]+bestaudio/best[height<=?%s]/best' "$h" "$h"
+  fi
+}
+
+cmd_session() { # cmd_session <video-id> <title>
+  local id="$1" title="${2:-YouTube}" mpv_pid raw=()
+  echo "$$" > "$PID_FILE"
+  # setsid gives this session its own process group, so killing the group on the
+  # way out takes yt-dlp's downloader with it.
+  trap 'trap - EXIT; rm -f "$PID_FILE"; kill -- "-$$" 2>/dev/null || true' EXIT
+
+  if [[ -s $COOKIES ]]; then
+    install -m 600 "$COOKIES" "$RUN_DIR/yt-cookies-play.txt"
+    raw=(--ytdl-raw-options="cookies=$RUN_DIR/yt-cookies-play.txt")
+  fi
+
+  overlay_mpv_args "$APP_ID" "$title"
+  rm -f "$SOCKET"
+
+  mpv "${OVERLAY_MPV_ARGS[@]}" --ytdl-format="$(ytdl_format)" "${raw[@]}" \
+    "https://www.youtube.com/watch?v=$id" >/dev/null 2>&1 &
+  mpv_pid=$!
+
+  overlay_apply_size_when_ready
+  wait "$mpv_pid" || true
+}
+
+video_id() { # video_id <id|url>
+  local in="$1"
+  if [[ $in =~ ^[A-Za-z0-9_-]{11}$ ]]; then printf '%s' "$in"; return; fi
+  printf '%s' "$in" | sed -n \
+    -e 's#.*[?&]v=\([A-Za-z0-9_-]\{11\}\).*#\1#p' \
+    -e 's#.*youtu\.be/\([A-Za-z0-9_-]\{11\}\).*#\1#p' \
+    -e 's#.*/shorts/\([A-Za-z0-9_-]\{11\}\).*#\1#p' | head -1
+}
+
+cmd_play() { # cmd_play <id|url>
+  local id; id="$(video_id "${1:?video id or URL required}")"
+  [[ -n $id ]] || die "Could not read a video id out of that"
+  stop_existing
+  setsid -f "$0" _session "$id" "YouTube" >> "$LOG" 2>&1
+}
+
+cmd_quality() { # cmd_quality <720|best|toggle>
+  local want="${1:-toggle}" cur; cur="$(height)"
+  [[ $want == "toggle" ]] && { [[ $cur == "best" ]] && want="$DEFAULT_HEIGHT" || want="best"; }
+  printf '%s\n' "$want" > "$QUALITY_FILE"
+  note "YouTube quality: $([[ $want == best ]] && echo "source" || echo "${want}p")"
+
+  # Only restart if this overlay is the one playing.
+  [[ "$(overlay_field .class)" == "$APP_ID" ]] || return 0
+  local url id; url="$(mpv_get path)"
+  [[ -n $url && $url != null ]] || return 0
+  id="$(video_id "$url")"
+  [[ -n $id ]] || return 0
+  stop_existing
+  setsid -f "$0" _session "$id" "YouTube" >> "$LOG" 2>&1
+}
+
+cmd_auth() {
+  if [[ -s $COOKIES ]] && signed_in; then
+    note "YouTube: signed in."
+    printf 'Signed in. The personal feeds are available.\n'
+    return 0
+  fi
+  note "YouTube cookies are not signed in."
+  cat <<'EOF'
+Not signed in. Search and channel browsing still work.
+
+To enable Subscriptions, Recommended, Watch Later, history and your playlists,
+export cookies from a PRIVATE window. YouTube rotates the session of a browser
+you are actively using, which invalidates any cookies exported from it. A
+private window you never sign out of keeps its session frozen instead.
+
+  1. Open a private/incognito window and sign in to YouTube.
+  2. In that same window open https://www.youtube.com/robots.txt
+     (this stops the session rotating while you export).
+  3. Export cookies for youtube.com with a cookies.txt browser extension.
+  4. Save it as ~/.config/youtube-float/cookies.txt, then:
+        chmod 600 ~/.config/youtube-float/cookies.txt
+  5. Close the private window WITHOUT signing out.
+  6. Run: youtube-float auth
+EOF
+}
+
+case "${1:-browse}" in
+  browse)      cmd_browse ;;
+  _browse_tui) cmd_browse_tui ;;
+  _preview)    shift || true; render_preview "${1:--}" "${2:--}" ;;
+  play)        shift; cmd_play "${1:?video id or URL required}" ;;
+  quality)     shift || true; cmd_quality "${1:-toggle}" ;;
+  auth)        cmd_auth ;;
+  toggle)      cmd_toggle ;;
+  quit)        cmd_quit ;;
+  size)        shift || true; cmd_size "${1:-cycle}" ;;
+  _session)    shift; cmd_session "$1" "${2:-YouTube}" ;;
+  *)           die "Unknown command: $1 (browse|play|quality|auth|toggle|quit|size)" ;;
+esac

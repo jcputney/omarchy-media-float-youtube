@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Installs the command-line half of a media-float tool.
+#
+# `omarchy plugin add` clones this repo and enables the overlay picker, but it
+# runs no install hook — the shell only ever loads the QML. The player, the
+# menus and the Hyprland rules all live outside the shell, so they are installed
+# here, by you, on purpose.
+#
+#   setup              install
+#   setup --uninstall  remove everything setup wrote
+#   setup --check      report what is installed and what is missing
+#
+# Safe to run twice, and safe to run for a second tool: the shared files are
+# byte-identical between them.
+
+set -euo pipefail
+
+HERE="$(cd -- "$(dirname -- "$(readlink -f "$0")")" && pwd)"
+BIN_DIR="$HOME/.local/bin"
+LIB_DIR="$HOME/.local/lib"
+HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+HYPR_RULES="$HYPR_DIR/media-float.lua"
+HYPR_MAIN="$HYPR_DIR/hyprland.lua"
+BEGIN_MARK="-- >>> media-float >>>"
+END_MARK="-- <<< media-float <<<"
+
+NAME="$(jq -r '.name // "media-float"' "$HERE/manifest.json")"
+PLUGIN_ID="$(jq -r '.id // ""' "$HERE/manifest.json")"
+
+say()  { printf '  %s\n' "$*"; }
+head2() { printf '\n%s\n' "$*"; }
+die()  { printf 'setup: %s\n' "$*" >&2; exit 1; }
+
+# ── Dependencies ────────────────────────────────────────────────────────────
+# Split by consequence: without a required tool nothing plays at all, without an
+# optional one you lose one feature. Reporting them the same way sends people
+# installing packages they do not need.
+required_cmds() {
+  printf '%s\n' mpv jq curl hyprctl socat
+  case "$PLUGIN_ID" in
+    *twitch)  printf '%s\n' streamlink ;;
+    *youtube) printf '%s\n' yt-dlp ;;
+  esac
+}
+
+optional_cmds() { printf '%s\n' fzf chafa ghostty notify-send; }
+
+check_deps() {
+  local missing=() c
+  while read -r c; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+  done < <(required_cmds)
+  if (( ${#missing[@]} )); then
+    head2 "Missing required commands: ${missing[*]}"
+    say "Install them with: omarchy pkg add ${missing[*]}"
+    die "cannot continue without them"
+  fi
+
+  missing=()
+  while read -r c; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+  done < <(optional_cmds)
+  if (( ${#missing[@]} )); then
+    head2 "Missing optional commands: ${missing[*]}"
+    say "fzf, chafa and ghostty are the fallback menu, used when the shell"
+    say "plugin is disabled. notify-send reports errors. Everything else works"
+    say "without them."
+  fi
+}
+
+# ── Hyprland ────────────────────────────────────────────────────────────────
+# The rules go in their own file and hyprland.lua gets one guarded require. A
+# marked block in a file you own beats a drop-in you would never find: it greps,
+# it diffs, and --uninstall can take it back out again.
+install_hypr() {
+  [[ -d $HYPR_DIR ]] || die "no $HYPR_DIR — is this an Omarchy system?"
+  install -Dm644 "$HERE/hypr/media-float.lua" "$HYPR_RULES"
+  say "wrote $HYPR_RULES"
+
+  if [[ -f $HYPR_MAIN ]] && grep -qF -e "$BEGIN_MARK" "$HYPR_MAIN"; then
+    say "hyprland.lua already loads it"
+  elif [[ -f $HYPR_MAIN ]]; then
+    cat >> "$HYPR_MAIN" <<EOF
+
+$BEGIN_MARK
+-- Window rules for the floating media overlays. Managed by the media-float
+-- setup script; remove this block and hypr/media-float.lua to uninstall.
+require("hypr.media-float")
+$END_MARK
+EOF
+    say "added the require block to $HYPR_MAIN"
+  else
+    head2 "No $HYPR_MAIN to edit. Add this line to your Hyprland config yourself:"
+    say 'require("hypr.media-float")'
+  fi
+}
+
+remove_hypr() {
+  rm -f "$HYPR_RULES" && say "removed $HYPR_RULES"
+  if [[ -f $HYPR_MAIN ]] && grep -qF -e "$BEGIN_MARK" "$HYPR_MAIN"; then
+    # Drop the marked block, then any blank lines it left at the end.
+    local tmp; tmp="$(mktemp)"
+    awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+      $0 == b { inblock = 1; next }
+      $0 == e { inblock = 0; next }
+      inblock { next }
+      { print }
+    ' "$HYPR_MAIN" | awk '{ lines[NR] = $0 }
+      END { last = NR; while (last > 0 && lines[last] ~ /^[[:space:]]*$/) last--
+            for (i = 1; i <= last; i++) print lines[i] }' > "$tmp"
+    mv "$tmp" "$HYPR_MAIN"
+    say "removed the require block from $HYPR_MAIN"
+  fi
+}
+
+# ── Commands ────────────────────────────────────────────────────────────────
+# Shared files are byte-identical across the three tools, so a second install
+# overwrites them with the same bytes. Nothing is refcounted, which is why
+# --uninstall leaves the shared library alone unless it is the last one out.
+installed_siblings() { # other media-float tools still present in ~/.local/bin
+  local f n=0
+  for f in "$BIN_DIR"/plex-float "$BIN_DIR"/twitch-float "$BIN_DIR"/youtube-float; do
+    [[ -f $f ]] && n=$(( n + 1 ))
+  done
+  printf '%s' "$n"
+}
+
+install_cmds() {
+  local f
+  mkdir -p "$BIN_DIR" "$LIB_DIR"
+  for f in "$HERE"/bin/*; do
+    [[ -f $f ]] || continue
+    install -Dm755 "$f" "$BIN_DIR/${f##*/}"
+    say "installed $BIN_DIR/${f##*/}"
+  done
+  for f in "$HERE"/lib/*; do
+    [[ -f $f ]] || continue
+    install -Dm755 "$f" "$LIB_DIR/${f##*/}"
+    say "installed $LIB_DIR/${f##*/}"
+  done
+}
+
+remove_cmds() {
+  local f
+  for f in "$HERE"/bin/*; do
+    [[ -f $f ]] || continue
+    rm -f "$BIN_DIR/${f##*/}" && say "removed $BIN_DIR/${f##*/}"
+  done
+  if [[ $(installed_siblings) -gt 0 ]]; then
+    say "kept $LIB_DIR/float-overlay.sh — another media-float tool still uses it"
+  else
+    for f in "$HERE"/lib/*; do
+      [[ -f $f ]] || continue
+      rm -f "$LIB_DIR/${f##*/}" && say "removed $LIB_DIR/${f##*/}"
+    done
+    remove_hypr
+  fi
+}
+
+# ── Report ──────────────────────────────────────────────────────────────────
+cmd_check() {
+  local c
+  head2 "$NAME"
+  while read -r c; do
+    command -v "$c" >/dev/null 2>&1 \
+      && say "ok       $c" || say "MISSING  $c (required)"
+  done < <(required_cmds)
+  while read -r c; do
+    command -v "$c" >/dev/null 2>&1 \
+      && say "ok       $c" || say "absent   $c (optional)"
+  done < <(optional_cmds)
+  [[ -f $HYPR_RULES ]] && say "ok       $HYPR_RULES" || say "MISSING  $HYPR_RULES"
+  if [[ -n $PLUGIN_ID ]] && command -v omarchy >/dev/null 2>&1; then
+    omarchy plugin list --json 2>/dev/null \
+      | jq -e --arg i "$PLUGIN_ID" 'any(.[]; .id == $i and (.enabled // false))' >/dev/null 2>&1 \
+      && say "ok       overlay picker enabled" \
+      || say "absent   overlay picker (menus use the ghostty fallback)"
+  fi
+}
+
+bindings_hint() {
+  local suggested
+  case "$PLUGIN_ID" in
+    *plex)    suggested='o.bind("SUPER + ALT + P", "Plex: search and play", "plex-float search")' ;;
+    *twitch)  suggested='o.bind("SUPER + ALT + T", "Twitch: browse and play", "twitch-float browse")' ;;
+    *youtube) suggested='o.bind("SUPER + ALT + Y", "YouTube: browse and play", "youtube-float browse")' ;;
+    *)        suggested='' ;;
+  esac
+  head2 "Keybindings are yours to choose, so setup does not touch bindings.lua."
+  say "Add to ~/.config/hypr/bindings.lua:"
+  printf '\n'
+  [[ -n $suggested ]] && printf '    %s\n' "$suggested"
+  printf '    %s\n' 'o.bind("SUPER + ALT + SHIFT + P", "Overlay: hide/show", "float-overlay toggle")'
+  printf '    %s\n' 'o.bind("SUPER + ALT + CTRL + P", "Overlay: close", "float-overlay quit")'
+  printf '    %s\n' 'o.bind("SUPER + ALT + O", "Overlay: cycle size", "float-overlay size cycle")'
+}
+
+case "${1:-install}" in
+  --check|check)
+    cmd_check
+    ;;
+  --uninstall|uninstall)
+    head2 "Removing $NAME"
+    remove_cmds
+    hyprctl reload >/dev/null 2>&1 || true
+    head2 "Done. The plugin itself: omarchy plugin remove $PLUGIN_ID"
+    ;;
+  install|"")
+    head2 "Installing $NAME"
+    check_deps
+    install_cmds
+    install_hypr
+    hyprctl reload >/dev/null 2>&1 || true
+    # The shell caches plugin QML once loaded; a rescan alone will not pick up a
+    # newly cloned picker, so the overlay stays dark until the shell restarts.
+    if [[ -n $PLUGIN_ID ]] && command -v omarchy-shell >/dev/null 2>&1; then
+      omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+      head2 "Restart the shell so it loads the overlay picker:"
+      say "omarchy restart shell"
+    fi
+    bindings_hint
+    ;;
+  *)
+    die "unknown argument: $1 (try --check or --uninstall)"
+    ;;
+esac

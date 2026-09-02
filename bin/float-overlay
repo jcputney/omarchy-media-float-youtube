@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# float-overlay — controls for whichever floating overlay is currently up
+# (plex-float, twitch-float). One set of keys drives them all.
+#
+#   float-overlay toggle          hide/show
+#   float-overlay quit            stop and close
+#   float-overlay size <what>     small|medium|large|huge|larger|smaller|cycle
+
+set -euo pipefail
+
+OVERLAY_APP_NAME="Overlay"
+# shellcheck source=/dev/null
+source "$HOME/.local/lib/float-overlay.sh"
+
+case "${1:-toggle}" in
+  toggle) cmd_toggle ;;
+  quit)   cmd_quit ;;
+  size)   shift || true; cmd_size "${1:-cycle}" ;;
+  *)      die "Unknown command: $1 (toggle|quit|size)" ;;
+esac
