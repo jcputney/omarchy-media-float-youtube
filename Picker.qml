@@ -192,8 +192,13 @@ Item {
         // sensible card on a 1080p panel and a postage stamp on a 4K one.
         width: Math.min(Math.max(Style.space(900), parent.width * 0.58),
                         parent.width - Style.gapsOut * 4)
-        height: Math.min(Math.max(Style.space(600), parent.height * 0.66),
-                         parent.height - Style.gapsOut * 4)
+        // A free-text prompt has no list and no preview, so it shrinks to the
+        // two lines it actually draws rather than opening as an empty slab.
+        height: root.freeText
+          ? Style.spacing.panelPadding * 2 + Style.spacing.md
+            + Style.font.title + Style.font.body * 2
+          : Math.min(Math.max(Style.space(600), parent.height * 0.66),
+                     parent.height - Style.gapsOut * 4)
         color: root.background
         radius: root.cornerRadius
         border.color: root.borderColor
