@@ -7,6 +7,8 @@ and follows you from workspace to workspace. Made for
 Watch Later and anything you left partway through come first, then your
 subscriptions, your playlists, your channels, and search.
 
+![The picker](preview.png)
+
 ## Install
 
 ```bash
