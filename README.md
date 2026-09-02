@@ -15,11 +15,12 @@ omarchy plugin add https://github.com/jcputney/omarchy-media-float-youtube.git -
 omarchy restart shell
 ```
 
-Two commands, because they install different halves. `omarchy plugin add` gives
-the shell the picker overlay; `setup` installs the `youtube-float` command, the
-window rules, and checks you have mpv and yt-dlp. The shell caches plugin QML
-once it has loaded it, so it needs the restart to notice a picker that was not
-there before.
+The plugin and the command are separate halves, so there are two installers.
+`omarchy plugin add` hands the shell the picker overlay. `setup` installs the
+`youtube-float` command, the window rules, and checks you have mpv and yt-dlp.
+
+The restart is the third line because the shell caches plugin QML once it has
+loaded it — without it, the picker you just installed stays dark.
 
 `setup --check` reports what is installed. `setup --uninstall` takes back
 everything it wrote.
