@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.jcputney.media-float-youtube",
   "name": "YouTube Float",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "author": "jcputney",
   "license": "MIT",
   "description": "Pick up where you left off on YouTube, browse subscriptions and search, and play the result in a floating, pinned mpv window.",

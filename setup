@@ -36,7 +36,10 @@ die()  { printf 'setup: %s\n' "$*" >&2; exit 1; }
 # optional one you lose one feature. Reporting them the same way sends people
 # installing packages they do not need.
 required_cmds() {
-  printf '%s\n' mpv jq curl hyprctl socat
+  # xdg-open hands the sign-in page to your browser. xdg-settings, which the
+  # YouTube tool uses to find which browser that is, ships in the same package,
+  # so checking one covers both.
+  printf '%s\n' mpv jq curl hyprctl socat xdg-open
   case "$PLUGIN_ID" in
     *twitch)  printf '%s\n' streamlink ;;
     *youtube) printf '%s\n' yt-dlp ;;
@@ -45,14 +48,37 @@ required_cmds() {
 
 optional_cmds() { printf '%s\n' fzf chafa ghostty notify-send; }
 
+# Command name and package name are the same for everything here except the
+# xdg helpers, so map only what differs and leave the rest alone.
+pkg_for() {
+  case "$1" in
+    xdg-open|xdg-settings) printf 'xdg-utils' ;;
+    *)                     printf '%s' "$1" ;;
+  esac
+}
+
+# Guided sign-in drives a real browser on a throwaway profile, so YouTube needs
+# one of these installed. `auth --manual` does not, which is why a missing
+# browser warns instead of stopping the install.
+browsers() { printf '%s\n' firefox chromium google-chrome-stable brave vivaldi; }
+
+have_browser() {
+  local b
+  while read -r b; do
+    command -v "$b" >/dev/null 2>&1 && return 0
+  done < <(browsers)
+  return 1
+}
+
 check_deps() {
-  local missing=() c
+  local missing=() c pkgs=()
   while read -r c; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done < <(required_cmds)
   if (( ${#missing[@]} )); then
+    for c in "${missing[@]}"; do pkgs+=("$(pkg_for "$c")"); done
     head2 "Missing required commands: ${missing[*]}"
-    say "Install them with: omarchy pkg add ${missing[*]}"
+    say "Install them with: omarchy pkg add ${pkgs[*]}"
     die "cannot continue without them"
   fi
 
@@ -65,6 +91,13 @@ check_deps() {
     say "fzf, chafa and ghostty are the fallback menu, used when the shell"
     say "plugin is disabled. notify-send reports errors. Everything else works"
     say "without them."
+  fi
+
+  if [[ $PLUGIN_ID == *youtube ]] && ! have_browser; then
+    head2 "No supported browser found: $(browsers | tr '\n' ' ')"
+    say "youtube-float auth signs you in by opening one of these on a throwaway"
+    say "profile. Without one, use youtube-float auth --manual and supply the"
+    say "cookies yourself."
   fi
 }
 
@@ -173,6 +206,10 @@ cmd_check() {
     command -v "$c" >/dev/null 2>&1 \
       && say "ok       $c" || say "absent   $c (optional)"
   done < <(optional_cmds)
+  if [[ $PLUGIN_ID == *youtube ]]; then
+    have_browser && say "ok       browser for guided sign-in" \
+      || say "absent   browser for guided sign-in (auth --manual still works)"
+  fi
   [[ -f $HYPR_RULES ]] && say "ok       $HYPR_RULES" || say "MISSING  $HYPR_RULES"
   if [[ -n $PLUGIN_ID ]] && command -v omarchy >/dev/null 2>&1; then
     omarchy plugin list --json 2>/dev/null \

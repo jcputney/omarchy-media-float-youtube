@@ -118,11 +118,16 @@ That directory holds your YouTube cookies.
 
 ## Requirements
 
-`mpv`, `yt-dlp`, `jq`, `curl`, `hyprctl`, `socat`.
+`mpv`, `yt-dlp`, `jq`, `curl`, `hyprctl`, `socat`, `xdg-utils`.
 
 `fzf`, `chafa` and `ghostty` are optional. They are the fallback menu, used when
 the shell plugin is disabled or you are not on Omarchy — the whole tool works
 without the plugin, just in a terminal window instead of a native overlay.
+`notify-send` is optional too; without it errors go to the terminal only.
+
+Guided sign-in (`youtube-float auth`) opens a browser on a throwaway profile,
+so it needs one of `firefox`, `chromium`, `google-chrome-stable`, `brave` or
+`vivaldi`. `youtube-float auth --manual` does not.
 
 ## Related
 
