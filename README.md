@@ -34,17 +34,29 @@ history and playlists need cookies:
 youtube-float auth
 ```
 
-That prints the steps and tells you whether the cookies you have still work.
+That opens a browser profile used only by this tool. Sign in, close the window,
+and it exports the cookies itself — no extension, no file to place, no `chmod`.
+Your password goes into a real browser; the tool never sees it.
+
+It follows your default browser where it can (Chromium, Chrome, Brave, Vivaldi
+and Firefox are all supported), and falls back to whichever of Chromium or
+Firefox is installed.
 
 Cookies, not OAuth, because YouTube's Data API has had no route to your
 recommendations, Watch Later or watch history since 2016. There is no OAuth
-scope to ask for. Export cookies from a browser profile you are signed into,
-save them as Netscape-format `~/.config/youtube-float/cookies.txt` (mode 0600),
-and check them with `youtube-float auth`.
+scope to ask for.
 
-One thing worth knowing: YouTube invalidates cookies exported from a browser
-profile that is still actively signed in and being used. Export from a profile
-you then leave alone — a dedicated one works best.
+The dedicated profile is the trick that makes this stick. YouTube rotates the
+session of a browser you keep using, which silently invalidates any cookies
+exported from it — that is why exporting from your everyday browser fails. A
+profile that is never browsed in again keeps its session, so re-running
+`youtube-float auth` refreshes the cookies without asking you to sign in again.
+
+That profile holds a live YouTube session, so it is stored 0700 under
+`~/.local/share/youtube-float/browser`. Delete that directory to sign out.
+
+Prefer to do it by hand? `youtube-float auth --manual` prints the older
+cookies.txt-extension steps instead.
 
 ## Use it
 

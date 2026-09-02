@@ -299,15 +299,158 @@ cmd_quality() { # cmd_quality <720|best|toggle>
   setsid -f "$0" _session "$id" "YouTube" >> "$LOG" 2>&1
 }
 
-cmd_auth() {
-  if [[ -s $COOKIES ]] && signed_in; then
+# ── Guided sign-in ──────────────────────────────────────────────────────────
+# YouTube has no OAuth route to your subscriptions, Watch Later or history --
+# Google removed API access to them in 2016 -- so the personal feeds need
+# cookies from a signed-in session. Rather than walk people through a cookie
+# extension, drive a browser profile that exists only for this.
+#
+# The profile is the point. YouTube rotates the session of a browser you keep
+# using, which silently invalidates any cookies exported from it; a profile that
+# is never browsed in again keeps its session. It also means refreshing cookies
+# later needs no new sign-in.
+#
+# Your password is typed into a real browser. This tool never sees it.
+PROFILE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/youtube-float/browser"
+
+# Chromium reads its cookie key from the system keyring by default, which drags
+# in python-secretstorage and fails without a running keyring. --password-store=
+# basic uses the built-in key instead, which yt-dlp can decrypt unaided.
+browser_backend() { # echoes "<yt-dlp name>\t<binary>\t<chromium|firefox>"
+  local desktop bin
+  desktop="$(env -u BROWSER xdg-settings get default-web-browser 2>/dev/null)"
+  case "$desktop" in
+    firefox*)            bin=firefox;               set -- firefox  "$bin" firefox  ;;
+    chromium*)           bin=chromium;              set -- chromium "$bin" chromium ;;
+    *google-chrome*)     bin=google-chrome-stable;  set -- chrome   "$bin" chromium ;;
+    brave*)              bin=brave;                 set -- brave    "$bin" chromium ;;
+    vivaldi*)            bin=vivaldi;               set -- vivaldi  "$bin" chromium ;;
+    *)                   set -- "" "" "" ;;
+  esac
+  if [[ -n ${2:-} ]] && command -v "$2" >/dev/null 2>&1; then
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3"; return 0
+  fi
+  # The default is unsupported or missing; take whatever is installed.
+  if command -v chromium >/dev/null 2>&1; then
+    printf 'chromium\tchromium\tchromium\n'; return 0
+  fi
+  if command -v firefox >/dev/null 2>&1; then
+    printf 'firefox\tfirefox\tfirefox\n'; return 0
+  fi
+  return 1
+}
+
+guided_auth() {
+  local ytname bin kind
+  IFS=$'\t' read -r ytname bin kind < <(browser_backend) || return 1
+  [[ -n ${ytname:-} ]] || return 1
+
+  # The profile holds a live YouTube session, so it is as sensitive as the
+  # cookie jar it produces.
+  ( umask 077; mkdir -p "$PROFILE_DIR" )
+
+  cat <<EOF
+
+Opening $bin with a browser profile used only by youtube-float.
+
+  1. Sign in to YouTube in the window that opens.
+  2. Close the window. Do NOT sign out.
+
+Waiting for the browser to close…
+EOF
+
+  local db
+  if [[ $kind == firefox ]]; then
+    db="$PROFILE_DIR/cookies.sqlite"
+    "$bin" -no-remote -profile "$PROFILE_DIR" https://www.youtube.com >/dev/null 2>&1 || true
+  else
+    db="$PROFILE_DIR/Default/Cookies"
+    "$bin" --user-data-dir="$PROFILE_DIR" --password-store=basic \
+           --no-first-run --no-default-browser-check \
+           https://www.youtube.com >/dev/null 2>&1 || true
+  fi
+
+  # Do not trust the launcher to block. Chromium in particular can hand off to a
+  # helper and return long before the window opens, which would have us export
+  # from a profile the browser has not written yet. Wait for the browser to
+  # actually be gone, then for its cookie store to exist and stop growing.
+  local i
+  for (( i = 0; i < 1800; i++ )); do
+    pgrep -f -- "$PROFILE_DIR" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  local size=0 prev=-1
+  for (( i = 0; i < 30; i++ )); do
+    size=$(stat -c %s "$db" 2>/dev/null || echo 0)
+    (( size > 0 && size == prev )) && break
+    prev=$size
+    sleep 1
+  done
+  if (( size == 0 )); then
+    printf 'The browser closed without leaving a cookie store.\n'
+    printf 'It may not have finished starting. Try again.\n'
+    return 1
+  fi
+
+  printf 'Exporting cookies…\n'
+  local jar; jar="$(mktemp "$RUN_DIR/yt-export.XXXXXX")"
+  printf '# Netscape HTTP Cookie File\n' > "$jar"
+  local yterr="$RUN_DIR/yt-export.err"
+  ( umask 077
+    yt-dlp --cookies-from-browser "$ytname:$PROFILE_DIR" --cookies "$jar" \
+           --skip-download --playlist-items 0 --ignore-no-formats-error \
+           --no-warnings \
+           "https://www.youtube.com/feed/subscriptions" >"$yterr" 2>&1 ) || true
+  if [[ ! -s $jar ]]; then
+    rm -f "$jar"
+    printf 'No cookies came back from %s. yt-dlp said:\n' "$bin"
+    sed 's/^/    /' "$yterr" 2>/dev/null | tail -5
+    return 1
+  fi
+
+  if COOKIES="$jar" signed_in; then
+    ( umask 077; mkdir -p "$(dirname "$COOKIES")" )
+    mv "$jar" "$COOKIES"
+    chmod 600 "$COOKIES"
+    note "YouTube: signed in."
+    printf 'Signed in. Subscriptions, Watch Later and history are available.\n'
+    printf 'Renew later with `youtube-float auth --refresh`; the profile is kept,\n'
+    printf 'so it will not ask you to sign in again unless the session expires.\n'
+    return 0
+  fi
+
+  rm -f "$jar"
+  printf 'Cookies came back, but they are not signed in.\n'
+  printf 'Sign in inside that browser window before closing it, then try again.\n'
+  printf 'Your existing cookies.txt was left alone.\n'
+  return 1
+}
+
+cmd_auth() { # cmd_auth [--manual|--refresh]
+  # --refresh forces the browser flow even when the current cookies still work,
+  # which is the only way to renew a session before it lapses.
+  if [[ ${1:-} == "--refresh" ]]; then
+    guided_auth && return 0
+    printf 'Refresh failed. Your existing cookies.txt is unchanged.\n'
+    return 1
+  fi
+  if [[ ${1:-} != "--manual" && -s $COOKIES ]] && signed_in; then
     note "YouTube: signed in."
     printf 'Signed in. The personal feeds are available.\n'
+    printf 'To renew the session: youtube-float auth --refresh\n'
     return 0
   fi
   note "YouTube cookies are not signed in."
+
+  # Drive a browser if we can. Only fall through to the hand instructions when
+  # there is no browser to drive, or the guided run did not get us signed in.
+  if [[ ${1:-} != "--manual" ]] && guided_auth; then
+    return 0
+  fi
+
   cat <<'EOF'
-Not signed in. Search and channel browsing still work.
+
+Doing it by hand instead. Search and channel browsing still work without this.
 
 To enable Subscriptions, Recommended, Watch Later, history and your playlists,
 export cookies from a PRIVATE window. YouTube rotates the session of a browser
@@ -331,10 +474,10 @@ case "${1:-browse}" in
   _preview)    shift || true; render_preview "${1:--}" "${2:--}" ;;
   play)        shift; cmd_play "${1:?video id or URL required}" ;;
   quality)     shift || true; cmd_quality "${1:-toggle}" ;;
-  auth)        cmd_auth ;;
+  auth)        shift || true; cmd_auth "${1:-}" ;;
   toggle)      cmd_toggle ;;
   quit)        cmd_quit ;;
   size)        shift || true; cmd_size "${1:-cycle}" ;;
   _session)    shift; cmd_session "$1" "${2:-YouTube}" ;;
-  *)           die "Unknown command: $1 (browse|play|quality|auth|toggle|quit|size)" ;;
+  *)           die "Unknown command: $1 (browse|play|quality|auth [--refresh|--manual]|toggle|quit|size)" ;;
 esac

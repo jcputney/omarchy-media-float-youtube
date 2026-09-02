@@ -141,17 +141,21 @@ install_cmds() {
 }
 
 remove_cmds() {
-  local f
+  local f target
   for f in "$HERE"/bin/*; do
     [[ -f $f ]] || continue
-    rm -f "$BIN_DIR/${f##*/}" && say "removed $BIN_DIR/${f##*/}"
+    target="$BIN_DIR/${f##*/}"
+    [[ -e $target ]] || continue
+    rm -f "$target" && say "removed $target"
   done
   if [[ $(installed_siblings) -gt 0 ]]; then
     say "kept $LIB_DIR/float-overlay.sh — another media-float tool still uses it"
   else
     for f in "$HERE"/lib/*; do
       [[ -f $f ]] || continue
-      rm -f "$LIB_DIR/${f##*/}" && say "removed $LIB_DIR/${f##*/}"
+      target="$LIB_DIR/${f##*/}"
+      [[ -e $target ]] || continue
+      rm -f "$target" && say "removed $target"
     done
     remove_hypr
   fi
@@ -176,6 +180,29 @@ cmd_check() {
       && say "ok       overlay picker enabled" \
       || say "absent   overlay picker (menus use the ghostty fallback)"
   fi
+}
+
+# Installing the command is not the same as being able to use it. Each tool
+# needs a different first move, and setup is the last thing that has the user's
+# attention -- saying nothing here is how someone ends up with a working install
+# and an empty menu.
+first_run_hint() {
+  head2 "First run:"
+  case "$PLUGIN_ID" in
+    *plex)
+      say "plex-float auth      sign in via plex.tv (approve in the browser)"
+      say "plex-float server    choose a server, if you can reach more than one"
+      ;;
+    *twitch)
+      say "twitch-float auth    sign in with a device code (approve in the browser)"
+      say "Categories, top channels and search work without signing in."
+      ;;
+    *youtube)
+      say "youtube-float auth   explains how to supply YouTube cookies"
+      say "Search and channel browsing work without them; your subscriptions,"
+      say "Watch Later, history and playlists do not."
+      ;;
+  esac
 }
 
 bindings_hint() {
@@ -218,6 +245,7 @@ case "${1:-install}" in
       head2 "Restart the shell so it loads the overlay picker:"
       say "omarchy restart shell"
     fi
+    first_run_hint
     bindings_hint
     ;;
   *)
