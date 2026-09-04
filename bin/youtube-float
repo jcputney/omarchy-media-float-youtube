@@ -160,53 +160,93 @@ tui_main_rows() {
   else
     nav_row "⚠   Sign in to see your feeds" \
       "Subscriptions, Recommended, Watch Later, history and your playlists all need YouTube cookies. Choose this row to print the steps." \
-      menu signin
+      signin -
   fi
   # YouTube retired /feed/trending in 2025 and the playlist that replaced it is
   # a frozen 2024 snapshot, so there is no "popular now" row worth showing.
   nav_row "🔍  Search YouTube…"     "Search all of YouTube by keyword. Works signed out." menu search
 }
 
-tui_submenu() { # tui_submenu <which>
+# Each level writes its own rows file, so stepping back re-reads what was
+# already fetched instead of pulling the feed again.
+menu_file() { printf '%s/menu-%s.tsv' "$CACHE_DIR" "$1"; }
+
+tui_submenu_rows() { # tui_submenu_rows <which>; writes rows to stdout
   case "$1" in
-    subscriptions) feed_rows "https://www.youtube.com/feed/subscriptions" "$JQ_VIDEOS" > "$MENU" ;;
-    recommended)   feed_rows "https://www.youtube.com/feed/recommended"   "$JQ_VIDEOS" > "$MENU" ;;
-    playlists)     feed_rows "https://www.youtube.com/feed/playlists"     "$JQ_PLAYLISTS" > "$MENU" ;;
-    channels)      feed_rows "https://www.youtube.com/feed/channels"      "$JQ_CHANNELS" > "$MENU" ;;
-    signin) emit "!auth"; return 0 ;;
+    subscriptions) feed_rows "https://www.youtube.com/feed/subscriptions" "$JQ_VIDEOS" ;;
+    recommended)   feed_rows "https://www.youtube.com/feed/recommended"   "$JQ_VIDEOS" ;;
+    playlists)     feed_rows "https://www.youtube.com/feed/playlists"     "$JQ_PLAYLISTS" ;;
+    channels)      feed_rows "https://www.youtube.com/feed/channels"      "$JQ_CHANNELS" ;;
     search)
       local q; q="$(ask "Search YouTube…")"
       [[ -n $q ]] || return 1
-      feed_rows "ytsearch${FEED_LIMIT}:$q" "$JQ_VIDEOS" > "$MENU"
-      ;;
-  esac
-  [[ -s $MENU ]] || { emit "!empty $1"; return 1; }
-  tui_route "$(pick "$MENU" "YouTube")"
-}
-
-tui_route() { # tui_route "<action>\t<value>[\t<title>]"
-  local action value title
-  [[ -n ${1:-} ]] || return 1
-  IFS=$'\t' read -r action value title <<< "$1"
-  case "$action" in
-    play) emit "$value"$'\t'"${title:-YouTube}" ;;
-    menu) tui_submenu "$value" ;;
-    channel)
-      feed_rows "https://www.youtube.com/channel/$value/videos" "$JQ_VIDEOS" > "$MENU"
-      [[ -s $MENU ]] || return 1
-      tui_route "$(pick "$MENU" "YouTube")"
-      ;;
-    playlist)
-      feed_rows "https://www.youtube.com/playlist?list=$value" "$JQ_VIDEOS" > "$MENU"
-      [[ -s $MENU ]] || return 1
-      tui_route "$(pick "$MENU" "YouTube")"
+      feed_rows "ytsearch${FEED_LIMIT}:$q" "$JQ_VIDEOS"
       ;;
   esac
 }
 
+submenu_label() { # submenu_label <which> [name]
+  case "$1" in
+    subscriptions) printf 'YouTube · subscriptions' ;;
+    recommended)   printf 'YouTube · recommended' ;;
+    playlists)     printf 'YouTube · playlists' ;;
+    channels)      printf 'YouTube · channels' ;;
+    search)        printf 'YouTube · search' ;;
+    channel)       printf 'YouTube · %s' "${2:-channel}" ;;
+    playlist)      printf 'YouTube · %s' "${2:-playlist}" ;;
+    *)             printf 'YouTube' ;;
+  esac
+}
+
+# The menu is a stack of levels rather than nested calls, so Escape and the
+# "← Back" row pop one instead of tearing the whole thing down. Only the top
+# level has nowhere above it: Escape closes there.
 cmd_browse_tui() {
-  tui_main_rows > "$MENU"
-  tui_route "$(pick "$MENU" "YouTube")" || true
+  local -a labels=()
+  local depth picked action value title rows f
+
+  tui_main_rows > "$(menu_file 0)"
+  labels=("YouTube")
+
+  while (( ${#labels[@]} > 0 )); do
+    depth=$(( ${#labels[@]} - 1 ))
+    f="$(menu_file "$depth")"
+    [[ -s $f ]] || { unset "labels[$depth]"; continue; }
+
+    if (( depth > 0 )); then
+      picked="$(pick "$f" "${labels[$depth]}" back)" || return 1
+    else
+      picked="$(pick "$f" "${labels[$depth]}")" || return 1
+    fi
+
+    if [[ -z $picked ]] || is_back "$picked"; then
+      (( depth == 0 )) && return 1
+      unset "labels[$depth]"
+      continue
+    fi
+
+    IFS=$'\t' read -r action value title <<< "$picked"
+    case "$action" in
+      play)   emit "$value"$'\t'"${title:-YouTube}"; return 0 ;;
+      signin) emit "!auth"; return 0 ;;
+      menu)
+        rows="$(tui_submenu_rows "$value")" || continue
+        [[ -n $rows ]] || { emit "!empty $value"; return 1; }
+        { back_row; printf '%s\n' "$rows"; } > "$(menu_file $(( depth + 1 )))"
+        labels+=("$(submenu_label "$value")")
+        ;;
+      channel|playlist)
+        if [[ $action == channel ]]; then
+          rows="$(feed_rows "https://www.youtube.com/channel/$value/videos" "$JQ_VIDEOS")"
+        else
+          rows="$(feed_rows "https://www.youtube.com/playlist?list=$value" "$JQ_VIDEOS")"
+        fi
+        [[ -n $rows ]] || continue
+        { back_row; printf '%s\n' "$rows"; } > "$(menu_file $(( depth + 1 )))"
+        labels+=("$(submenu_label "$action" "${title:-}")")
+        ;;
+    esac
+  done
 }
 
 cmd_browse() {

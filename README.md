@@ -68,6 +68,11 @@ youtube-float play <id|url>     # play one video
 youtube-float quality toggle    # 720p <-> best, restarts the video
 ```
 
+Every menu below the first level has a `←  Back` row at the top, and Escape
+steps back one level rather than closing. Escape on the first level closes the
+picker, as before.
+
+
 Add keybindings to `~/.config/hypr/bindings.lua` — `setup` prints these rather
 than editing the file, because which keys are free is your business:
 

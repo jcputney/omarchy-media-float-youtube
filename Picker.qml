@@ -6,7 +6,7 @@
 // stays a dumb "pick one of these" primitive with no idea what Plex or Twitch
 // or YouTube are.
 //
-// Payload: { rowsFile, selectionFile, doneFile, prompt }
+// Payload: { rowsFile, selectionFile, doneFile, prompt, freeText, backValue }
 // Row:     { label, image, info, value }
 
 import Quickshell
@@ -32,6 +32,10 @@ Item {
   property string doneFile: ""
   property string promptText: "Pick"
   property bool freeText: false
+  // What Escape answers with. A menu that has a level above it passes the
+  // caller's back sentinel here, so Escape steps up instead of closing. Empty
+  // — the default — is the old behaviour: Escape dismisses.
+  property string backValue: ""
 
   // Shares the [menu] surface tokens, so a theme that styles the Omarchy menu
   // styles this too.
@@ -53,6 +57,7 @@ Item {
     root.doneFile = p.doneFile || ""
     root.promptText = p.prompt || "Pick"
     root.freeText = p.freeText === true
+    root.backValue = p.backValue || ""
     root.filterText = ""
     root.selectedIndex = 0
     root.rows = []
@@ -88,6 +93,11 @@ Item {
     try { parsed = JSON.parse(text || "[]") } catch (e) { parsed = [] }
     root.rows = parsed
     root.rebuild()
+    // "← Back" sits first so it is visible without scrolling a long list, but
+    // opening on it would make Enter mean "go back". Start on the row below.
+    if (root.backValue !== "" && parsed.length > 1
+        && parsed[0].value === root.backValue)
+      root.selectedIndex = 1
   }
 
   // Every whitespace-separated term must appear somewhere in the label, which
@@ -158,7 +168,7 @@ Item {
 
       Keys.onPressed: function (event) {
         if (event.key === Qt.Key_Escape) {
-          root.finish(""); event.accepted = true
+          root.finish(root.backValue); event.accepted = true
         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
           // In free-text mode what you typed is the answer; there is nothing
           // to pick from.

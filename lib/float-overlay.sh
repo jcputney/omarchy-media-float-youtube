@@ -359,6 +359,17 @@ rows_to_json() { # rows_to_json <tsv-file>
         value: (.[3:] | join("\t")) }' "$1" | jq -s .
 }
 
+# ── Going back ──────────────────────────────────────────────────────────────
+# A menu with a level above it passes `back` as pick's third argument. Escape
+# then answers with this sentinel instead of cancelling, and a "← Back" row
+# carries the same value for the mouse and for the fzf fallback. The caller
+# pops one level and loops; a menu that does not ask for it is unchanged.
+FLOAT_BACK='__float_back__'
+
+back_row() { printf '\u2190  Back\t-\t\t%s\n' "$FLOAT_BACK"; }
+
+is_back() { [[ ${1:-} == "$FLOAT_BACK" ]]; }
+
 PICKER_LAYER="omarchy-media-float"
 
 picker_layer_up() {
@@ -392,13 +403,15 @@ await_pick() { # await_pick <selection-file> <done-file>
   cat "$1"
 }
 
-summon_pick() { # summon_pick <rows-file> <prompt>; echoes the chosen value
+summon_pick() { # summon_pick <rows-file> <prompt> [back]; echoes the chosen value
   local rowsf="$RUN_DIR/picker-rows.json" sel="$RUN_DIR/picker-sel" \
-        don="$RUN_DIR/picker-done" payload
+        don="$RUN_DIR/picker-done" payload backv=""
+  [[ ${3:-} == back ]] && backv="$FLOAT_BACK"
   ( umask 077; rows_to_json "$1" > "$rowsf" ) || return 1
   rm -f "$don"; : > "$sel"
   payload="$(jq -nc --arg r "$rowsf" --arg s "$sel" --arg d "$don" --arg p "$2" \
-    '{rowsFile:$r, selectionFile:$s, doneFile:$d, prompt:$p}')"
+    --arg b "$backv" \
+    '{rowsFile:$r, selectionFile:$s, doneFile:$d, prompt:$p, backValue:$b}')"
   omarchy-shell shell summon "$PICKER_PLUGIN_ID" "$payload" >/dev/null 2>&1 || return 1
   await_pick "$sel" "$don"
 }
@@ -438,9 +451,9 @@ run_menu() { # run_menu <command-string>; echoes whatever the TUI emitted
   fi
 }
 
-pick() { # pick <rows-file> <prompt>; echoes the value columns of the pick
-  if [[ ${FLOAT_PICKER_MODE:-fzf} == overlay ]]; then summon_pick "$1" "$2"
-  else fzf_pick "$1" "$2"; fi
+pick() { # pick <rows-file> <prompt> [back]; echoes the value columns of the pick
+  if [[ ${FLOAT_PICKER_MODE:-fzf} == overlay ]]; then summon_pick "$1" "$2" "${3:-}"
+  else fzf_pick "$1" "$2" "${3:-}"; fi
 }
 
 ask() { # ask <prompt>; free text typed by the user
@@ -468,17 +481,24 @@ run_picker() { # run_picker <command-string>; echoes whatever the TUI emitted
 picker_emit() { printf '%s\n' "$*" > "${FLOAT_PICKER_OUT:?picker_emit outside a picker}"; }
 emit() { picker_emit "$@"; }
 
-fzf_pick() { # fzf_pick <rows-file> <prompt>; echoes fields 4..n of the pick
-  local rows="$1" prompt="$2" sel
+fzf_pick() { # fzf_pick <rows-file> <prompt> [back]; echoes fields 4..n of the pick
+  local rows="$1" prompt="$2" back="${3:-}" sel
+  # Escape and an empty answer are the same gesture here, and both mean "up a
+  # level" when there is one.
+  dismissed() { [[ $back == back ]] && { printf '%s\n' "$FLOAT_BACK"; return 0; }; return 1; }
   [[ -s $rows ]] || return 1
+  # The back row is first so it is visible without scrolling, so start the
+  # cursor below it — otherwise Enter on an untouched list means "go back".
+  local start=(); [[ $back == back ]] && start=(--bind=load:down)
   sel="$(fzf --delimiter=$'\t' --with-nth=1 \
       "$(picker_fzf_colors)" \
+      "${start[@]}" \
       --prompt="$prompt " \
       --height=100% --layout=reverse --info=inline --border=none --no-multi \
       --preview="$SELF _preview {2} {3}" \
       --preview-window="right,48%,border-left" \
-      < "$rows")" || return 1
-  [[ -n $sel ]] || return 1
+      < "$rows")" || { dismissed; return $?; }
+  [[ -n $sel ]] || { dismissed; return $?; }
   printf '%s\n' "$sel" | cut -f4-
 }
 
