@@ -171,6 +171,28 @@ tui_main_rows() {
 # already fetched instead of pulling the feed again.
 menu_file() { printf '%s/menu-%s.tsv' "$CACHE_DIR" "$1"; }
 
+# Where the picker was when you chose a video. The rows for each level are
+# already on disk, so remembering the labels is enough to walk back into them.
+MENU_STATE="$CACHE_DIR/menu-state"
+RESUME_FILE="$CONFIG_DIR/resume"
+
+resume_enabled() { [[ "$(cat "$RESUME_FILE" 2>/dev/null || echo on)" == on ]]; }
+
+save_menu_state() { printf '%s\n' "${labels[@]}" > "$MENU_STATE"; }
+
+# Only restore a stack whose every level still has its rows. A half-present
+# stack would open on a level you cannot back out of.
+restore_menu_state() {
+  [[ -s $MENU_STATE ]] || return 0
+  local -a saved=(); local d
+  mapfile -t saved < "$MENU_STATE"
+  (( ${#saved[@]} > 0 )) || return 0
+  for (( d = 0; d < ${#saved[@]}; d++ )); do
+    [[ -s "$(menu_file "$d")" ]] || return 0
+  done
+  labels=("${saved[@]}")
+}
+
 tui_submenu_rows() { # tui_submenu_rows <which>; writes rows to stdout
   case "$1" in
     subscriptions) feed_rows "https://www.youtube.com/feed/subscriptions" "$JQ_VIDEOS" ;;
@@ -205,8 +227,11 @@ cmd_browse_tui() {
   local -a labels=()
   local depth picked action value title rows f
 
-  tui_main_rows > "$(menu_file 0)"
-  labels=("YouTube")
+  [[ ${YTF_RESUME:-0} == 1 ]] && restore_menu_state
+  if (( ${#labels[@]} == 0 )); then
+    tui_main_rows > "$(menu_file 0)"
+    labels=("YouTube")
+  fi
 
   while (( ${#labels[@]} > 0 )); do
     depth=$(( ${#labels[@]} - 1 ))
@@ -227,7 +252,7 @@ cmd_browse_tui() {
 
     IFS=$'\t' read -r action value title <<< "$picked"
     case "$action" in
-      play)   emit "$value"$'\t'"${title:-YouTube}"; return 0 ;;
+      play)   save_menu_state; emit "$value"$'\t'"${title:-YouTube}"; return 0 ;;
       signin) emit "!auth"; return 0 ;;
       menu)
         rows="$(tui_submenu_rows "$value")" || continue
@@ -249,8 +274,21 @@ cmd_browse_tui() {
   done
 }
 
-cmd_browse() {
+cmd_resume() { # cmd_resume <on|off|status>
+  case "${1:-status}" in
+    on|off)
+      ( umask 077; mkdir -p "$CONFIG_DIR"; printf '%s\n' "$1" > "$RESUME_FILE" )
+      note "Reopen the picker after a video: $1"
+      ;;
+    status) printf 'Reopen the picker after a video: %s\n' \
+              "$(cat "$RESUME_FILE" 2>/dev/null || echo on)" ;;
+    *) die "Usage: youtube-float resume <on|off|status>" ;;
+  esac
+}
+
+cmd_browse() { # cmd_browse [--resume]
   local picked id title
+  [[ ${1:-} == --resume ]] && export YTF_RESUME=1
   picked="$(run_menu "$SELF _browse_tui")"
   [[ -n $picked ]] || exit 0
 
@@ -267,7 +305,7 @@ cmd_browse() {
   IFS=$'\t' read -r id title <<< "$picked"
   [[ -n $id ]] || exit 0
   stop_existing
-  setsid -f "$0" _session "$id" "${title:-YouTube}" >> "$LOG" 2>&1
+  setsid -f "$0" _session "$id" "${title:-YouTube}" browse >> "$LOG" 2>&1
   note "Opening ${title:-that video}…"
 }
 
@@ -284,8 +322,8 @@ ytdl_format() {
   fi
 }
 
-cmd_session() { # cmd_session <video-id> <title>
-  local id="$1" title="${2:-YouTube}" mpv_pid raw=()
+cmd_session() { # cmd_session <video-id> <title> [browse]
+  local id="$1" title="${2:-YouTube}" from="${3:-}" mpv_pid raw=()
   echo "$$" > "$PID_FILE"
   # setsid gives this session its own process group, so killing the group on the
   # way out takes yt-dlp's downloader with it.
@@ -305,6 +343,14 @@ cmd_session() { # cmd_session <video-id> <title>
 
   overlay_apply_size_when_ready
   wait "$mpv_pid" || true
+
+  # Back to the picker, where you left it. This is only reached when mpv ended
+  # on its own or you closed it: starting another video kills this session's
+  # process group first, so a superseded session never gets here. setsid puts
+  # the new picker in its own group so the kill on the way out misses it.
+  if [[ $from == browse ]] && resume_enabled; then
+    setsid -f "$0" browse --resume >/dev/null 2>&1 || true
+  fi
 }
 
 video_id() { # video_id <id|url>
@@ -509,7 +555,7 @@ EOF
 }
 
 case "${1:-browse}" in
-  browse)      cmd_browse ;;
+  browse)      shift || true; cmd_browse "${1:-}" ;;
   _browse_tui) cmd_browse_tui ;;
   _preview)    shift || true; render_preview "${1:--}" "${2:--}" ;;
   play)        shift; cmd_play "${1:?video id or URL required}" ;;
@@ -518,6 +564,7 @@ case "${1:-browse}" in
   toggle)      cmd_toggle ;;
   quit)        cmd_quit ;;
   size)        shift || true; cmd_size "${1:-cycle}" ;;
-  _session)    shift; cmd_session "$1" "${2:-YouTube}" ;;
-  *)           die "Unknown command: $1 (browse|play|quality|auth [--refresh|--manual]|toggle|quit|size)" ;;
+  _session)    shift; cmd_session "$1" "${2:-YouTube}" "${3:-}" ;;
+  resume)      shift || true; cmd_resume "${1:-status}" ;;
+  *)           die "Unknown command: $1 (browse|play|quality|resume|auth [--refresh|--manual]|toggle|quit|size)" ;;
 esac

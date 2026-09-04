@@ -68,6 +68,24 @@ youtube-float play <id|url>     # play one video
 youtube-float quality toggle    # 720p <-> best, restarts the video
 ```
 
+## Back to where you were
+
+When a video finishes — or you close it — the picker reopens on the level you
+left it, with the same rows and the same cursor. Search four levels deep, watch
+something, and you land back in those results rather than at the top.
+
+Starting another video does not do this: the old session is stopped to make way
+for the new one, so it never reopens anything.
+
+```bash
+youtube-float resume off      # end a video and stay out of the picker
+youtube-float resume on       # the default
+youtube-float resume status
+```
+
+It only applies to videos you started from the picker. `youtube-float play <url>`
+from a keybind or a script plays and stops, as before.
+
 Every menu below the first level has a `←  Back` row at the top, and Escape
 steps back one level rather than closing. Escape on the first level closes the
 picker, as before.
