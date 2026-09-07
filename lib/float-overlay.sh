@@ -359,6 +359,23 @@ rows_to_json() { # rows_to_json <tsv-file>
         value: (.[3:] | join("\t")) }' "$1" | jq -s .
 }
 
+# ── Per-row detail ──────────────────────────────────────────────────────────
+# Some facts are too expensive to bake into every row. A YouTube like count
+# costs a full extraction — about two seconds — which is fine for one row and
+# unusable for forty. A tool that has such facts exports FLOAT_DETAIL_CMD;
+# both backends then run it for the row the cursor is actually resting on and
+# print what comes back under that row's own info.
+#
+# The command gets one argument, the row's value columns joined by tabs, and is
+# expected to print nothing for rows it has nothing to add.
+: "${FLOAT_DETAIL_CMD:=}"
+
+# One argument in, so a value with spaces or quotes in it stays one argument.
+run_detail() { # run_detail <value>
+  [[ -n ${FLOAT_DETAIL_CMD:-} && -n ${1:-} ]] || return 0
+  sh -c "$FLOAT_DETAIL_CMD \"\$1\"" sh "$1" 2>/dev/null || true
+}
+
 # ── Going back ──────────────────────────────────────────────────────────────
 # A menu with a level above it passes `back` as pick's third argument. Escape
 # then answers with this sentinel instead of cancelling, and a "← Back" row
@@ -410,8 +427,9 @@ summon_pick() { # summon_pick <rows-file> <prompt> [back]; echoes the chosen val
   ( umask 077; rows_to_json "$1" > "$rowsf" ) || return 1
   rm -f "$don"; : > "$sel"
   payload="$(jq -nc --arg r "$rowsf" --arg s "$sel" --arg d "$don" --arg p "$2" \
-    --arg b "$backv" \
-    '{rowsFile:$r, selectionFile:$s, doneFile:$d, prompt:$p, backValue:$b}')"
+    --arg b "$backv" --arg c "${FLOAT_DETAIL_CMD:-}" \
+    '{rowsFile:$r, selectionFile:$s, doneFile:$d, prompt:$p, backValue:$b,
+      detailCommand:$c}')"
   omarchy-shell shell summon "$PICKER_PLUGIN_ID" "$payload" >/dev/null 2>&1 || return 1
   await_pick "$sel" "$don"
 }
@@ -495,7 +513,7 @@ fzf_pick() { # fzf_pick <rows-file> <prompt> [back]; echoes fields 4..n of the p
       "${start[@]}" \
       --prompt="$prompt " \
       --height=100% --layout=reverse --info=inline --border=none --no-multi \
-      --preview="$SELF _preview {2} {3}" \
+      --preview="$SELF _preview {2} {3} {}" \
       --preview-window="right,48%,border-left" \
       < "$rows")" || { dismissed; return $?; }
   [[ -n $sel ]] || { dismissed; return $?; }
@@ -508,8 +526,8 @@ fzf_ask() { # fzf_ask <prompt>; free text typed by the user
       < /dev/null 2>/dev/null | head -1
 }
 
-render_preview() { # render_preview <image-url|-> <info|->
-  local url="${1:--}" info="${2:--}" cols lines rows f
+render_preview() { # render_preview <image-url|-> <info|-> [raw-row]
+  local url="${1:--}" info="${2:--}" row="${3:-}" cols lines rows f
   cols=${FZF_PREVIEW_COLUMNS:-40}
   lines=${FZF_PREVIEW_LINES:-20}
   if [[ $url != "-" ]]; then
@@ -542,5 +560,14 @@ render_preview() { # render_preview <image-url|-> <info|->
     # character passes through untouched.
     printf '\n'
     printf '%s\n' "$info" | tr '\037' '\n' | fold -s -w "$cols"
+  fi
+  # fzf kills the running preview when the cursor moves on, so a slow lookup
+  # only ever finishes for the row someone stopped at. That is the debounce.
+  if [[ -n $row ]]; then
+    local detail
+    detail="$(run_detail "$(printf '%s' "$row" | cut -f4-)")"
+    if [[ -n $detail ]]; then
+      printf '\n%s\n' "$detail" | fold -s -w "$cols"
+    fi
   fi
 }

@@ -6,7 +6,8 @@
 // stays a dumb "pick one of these" primitive with no idea what Plex or Twitch
 // or YouTube are.
 //
-// Payload: { rowsFile, selectionFile, doneFile, prompt, freeText, backValue }
+// Payload: { rowsFile, selectionFile, doneFile, prompt, freeText, backValue,
+//            detailCommand }
 // Row:     { label, image, info, value }
 
 import Quickshell
@@ -36,6 +37,13 @@ Item {
   // caller's back sentinel here, so Escape steps up instead of closing. Empty
   // — the default — is the old behaviour: Escape dismisses.
   property string backValue: ""
+  // Optional shell command for facts too slow to bake into every row. It is
+  // run for the row the cursor rests on, gets that row's value as its one
+  // argument, and whatever it prints is shown under the row's own info.
+  property string detailCommand: ""
+  property var detailCache: ({})
+  property string detailText: ""
+  property bool detailBusy: false
 
   // Shares the [menu] surface tokens, so a theme that styles the Omarchy menu
   // styles this too.
@@ -58,6 +66,8 @@ Item {
     root.promptText = p.prompt || "Pick"
     root.freeText = p.freeText === true
     root.backValue = p.backValue || ""
+    root.detailCommand = p.detailCommand || ""
+    root.clearDetail()
     root.filterText = ""
     root.selectedIndex = 0
     root.rows = []
@@ -134,6 +144,67 @@ Item {
   readonly property var current: (root.filtered.length > 0
     && root.selectedIndex < root.filtered.length)
     ? root.filtered[root.selectedIndex] : null
+
+  onCurrentChanged: root.refreshDetail()
+
+  function clearDetail() {
+    detailTimer.stop()
+    detailProc.forKey = ""
+    detailProc.running = false
+    root.detailBusy = false
+    root.detailText = ""
+    root.detailCache = ({})
+  }
+
+  function refreshDetail() {
+    detailTimer.stop()
+    // Dropping the key first: killing a process still finishes its stream, and
+    // that partial output must not be filed under the row we moved on to.
+    detailProc.forKey = ""
+    detailProc.running = false
+    root.detailBusy = false
+    var v = (root.current && root.current.value) ? root.current.value : ""
+    if (root.detailCommand === "" || v === "") { root.detailText = ""; return }
+    if (root.detailCache.hasOwnProperty(v)) { root.detailText = root.detailCache[v]; return }
+    root.detailText = ""
+    detailTimer.restart()
+  }
+
+  Timer {
+    id: detailTimer
+    // Long enough that holding an arrow key scrolls a list without firing a
+    // lookup per row, short enough to feel like it answers the moment you stop.
+    interval: 300
+    onTriggered: {
+      var v = (root.current && root.current.value) ? root.current.value : ""
+      if (v === "" || root.detailCommand === "") return
+      detailProc.forKey = v
+      detailProc.command = ["sh", "-c", root.detailCommand + " \"$1\"", "sh", v]
+      root.detailBusy = true
+      detailProc.running = true
+    }
+  }
+
+  Process {
+    id: detailProc
+    // The row this lookup was started for. Empty means the answer is stale and
+    // belongs nowhere.
+    property string forKey: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.detailBusy = false
+        if (detailProc.forKey === "") return
+        // A picker left open for a long browse would otherwise grow without
+        // bound. Starting over costs one lookup, not correctness.
+        if (Object.keys(root.detailCache).length > 200) root.detailCache = ({})
+        root.detailCache[detailProc.forKey] = text
+        if (root.current && root.current.value === detailProc.forKey)
+          root.detailText = text
+        detailProc.forKey = ""
+      }
+    }
+  }
 
   Process { id: writer }
 
@@ -323,7 +394,24 @@ Item {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 wrapMode: Text.WordWrap
-                maximumLineCount: 12
+                // Give the description less room when there are details to fit
+                // underneath it, so the two share the pane instead of one
+                // pushing the other off the card.
+                maximumLineCount: root.detailText !== "" ? 7 : 12
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                visible: text !== ""
+                text: root.detailText !== "" ? root.detailText
+                                             : (root.detailBusy ? "Loading details…" : "")
+                color: root.muted
+                opacity: root.detailBusy ? 0.4 : 0.75
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                wrapMode: Text.WordWrap
+                maximumLineCount: 8
                 elide: Text.ElideRight
               }
             }

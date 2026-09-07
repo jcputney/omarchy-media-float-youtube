@@ -25,6 +25,11 @@ export FLOAT_PICKER_PLUGIN_ID
 # shellcheck source=/dev/null
 source "$HOME/.local/lib/float-overlay.sh"
 
+# Like counts and upload dates cost a full extraction, so they cannot ride
+# along in the row list. The picker asks for them one row at a time instead.
+FLOAT_DETAIL_CMD="$(printf '%q' "$SELF") _detail"
+export FLOAT_DETAIL_CMD
+
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/youtube-float"
 COOKIES="$CONFIG_DIR/cookies.txt"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/youtube-float"
@@ -129,6 +134,79 @@ JQ_PLAYLISTS="$JQ_DEFS"'
       "playlist", .id ] | @tsv'
 
 nav_row() { printf '%s\t-\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"; }
+
+# ── Row detail ──────────────────────────────────────────────────────────────
+# A flat playlist listing is one request for the whole page, which is why the
+# rows above carry only what it returns: title, channel, duration, view count.
+# Everything below — upload date, likes, comments, subscriber count, the size
+# of the file that would actually play — needs a full extraction of a single
+# video, and that is a request and a second or two each. Forty of those is a
+# menu that never opens.
+#
+# So the picker asks for one row at a time, for the row the cursor came to rest
+# on, and both the picker and this file remember the answer.
+
+DETAIL_DIR="$CACHE_DIR/detail"
+DETAIL_TTL=21600   # counts drift slowly; six hours is close enough to live
+
+JQ_DETAIL='
+  # A decimal finer than the row lists use. Precision is the whole point of
+  # paying for this lookup: "1.7K comments" earns its place, "1K" does not.
+  def compact: if . == null then ""
+               elif . >= 1000000 then ((. / 100000 | floor) / 10 | tostring) + "M"
+               elif . >= 1000 then ((. / 100 | floor) / 10 | tostring) + "K"
+               else (tostring) end;
+  def mb: if . == null then "" else ((. / 100000 | floor) / 10 | tostring) + " MB" end;
+  def ymd: if ((. // "") | test("^[0-9]{8}$"))
+           then (.[0:4] + "-" + .[4:6] + "-" + .[6:8]) else "" end;
+  def row: map(select(. != null and . != "")) | join("  ·  ");
+  (.requested_downloads[0]? // {}) as $d
+  | [ (if ((.upload_date // "") | ymd) != "" then "Published " + (.upload_date|ymd) else "" end),
+      ([ (if .like_count then (.like_count|compact) + " likes" else "" end),
+         (if .comment_count then (.comment_count|compact) + " comments" else "" end),
+         (if .channel_follower_count
+          then (.channel_follower_count|compact) + " subscribers" else "" end) ] | row),
+      ([ ($d.resolution // ""),
+         (if $d.fps then ($d.fps|floor|tostring) + " fps" else "" end),
+         (if ($d.filesize // $d.filesize_approx)
+          then "~" + (($d.filesize // $d.filesize_approx)|mb) else "" end) ] | row),
+      ((.categories // []) | join(", ")),
+      ((.tags // []) | .[0:8] | join(", ")) ]
+  | map(select(. != null and . != "")) | join("\n")'
+
+cmd_detail() { # cmd_detail <picked-value>; the extra facts, or nothing
+  local action id f out jar=()
+  # Only video rows have anything to add. Channels, playlists, the nav rows and
+  # the back sentinel all fall through and print nothing.
+  IFS=$'\t' read -r action id _rest <<< "${1:-}"
+  [[ $action == play && $id =~ ^[A-Za-z0-9_-]+$ ]] || return 0
+
+  mkdir -p "$DETAIL_DIR"
+  f="$DETAIL_DIR/$id.txt"
+  if [[ -s $f ]] \
+     && (( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) < DETAIL_TTL )); then
+    cat "$f"; return 0
+  fi
+
+  if [[ -s $COOKIES ]]; then
+    # Its own copy: yt-dlp rewrites the jar it is handed, and a browse running
+    # at the same time is using the other one.
+    install -m 600 "$COOKIES" "$RUN_DIR/yt-cookies-detail.txt"
+    jar=(--cookies "$RUN_DIR/yt-cookies-detail.txt")
+  fi
+
+  # Asking for the format that would really play makes the size honest: it is
+  # the size of the download your quality setting would start, not of whatever
+  # yt-dlp would pick by default. The timeout is for live streams, which can
+  # otherwise sit there.
+  out="$(timeout 25 yt-dlp "${jar[@]}" --no-playlist --skip-download \
+        --no-warnings --ignore-errors --socket-timeout 10 \
+        -f "$(ytdl_format)" -J "https://www.youtube.com/watch?v=$id" 2>/dev/null \
+      | jq -r "$JQ_DETAIL" 2>/dev/null)" || true
+  [[ -n $out ]] || return 0
+
+  printf '%s\n' "$out" | tee "$f"
+}
 
 feed_rows() { # feed_rows <url> <jq-program> [row-limit] [row-prefix]
   local url="$1" prog="$2"
@@ -557,7 +635,8 @@ EOF
 case "${1:-browse}" in
   browse)      shift || true; cmd_browse "${1:-}" ;;
   _browse_tui) cmd_browse_tui ;;
-  _preview)    shift || true; render_preview "${1:--}" "${2:--}" ;;
+  _preview)    shift || true; render_preview "${1:--}" "${2:--}" "${3:-}" ;;
+  _detail)     shift || true; cmd_detail "${1:-}" ;;
   play)        shift; cmd_play "${1:?video id or URL required}" ;;
   quality)     shift || true; cmd_quality "${1:-toggle}" ;;
   auth)        shift || true; cmd_auth "${1:-}" ;;
