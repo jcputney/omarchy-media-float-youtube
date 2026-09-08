@@ -91,6 +91,9 @@ steps back one level rather than closing. Escape on the first level closes the
 picker, as before.
 
 
+`setup` adds **YouTube Float** to your app launcher, so you can open the picker
+without setting anything up. A keybinding is quicker once you use it often.
+
 Add keybindings to `~/.config/hypr/bindings.lua` — `setup` prints these rather
 than editing the file, because which keys are free is your business:
 
@@ -118,8 +121,8 @@ Two commands, mirroring the install:
 omarchy plugin remove io.github.jcputney.media-float-youtube
 ```
 
-`setup --uninstall` removes the `youtube-float` command, the shared `float-overlay`
-command and library, `~/.config/hypr/media-float.lua`, and the marked block it
+`setup --uninstall` removes the `youtube-float` command, the launcher entry, the
+shared `float-overlay` command and library, `~/.config/hypr/media-float.lua`, and the marked block it
 added to `hyprland.lua`. It leaves the shared pieces alone if another
 media-float tool is still installed, and it never touches keybindings you added
 yourself.

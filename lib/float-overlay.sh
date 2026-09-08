@@ -29,6 +29,114 @@ mkdir -p "$RUN_DIR" "$OVERLAY_CONFIG_DIR"
 note() { notify-send -a "${OVERLAY_APP_NAME:-Overlay}" "${OVERLAY_APP_NAME:-Overlay}" "$1" >/dev/null 2>&1 || true; }
 die() { note "$1"; printf '%s: %s\n' "${0##*/}" "$1" >&2; exit 1; }
 
+# ── Private files ───────────────────────────────────────────────────────────
+# Credentials live in files on a path anyone on this machine can predict, so
+# both halves of the traffic need a guarantee. Reading judges the descriptor
+# rather than the name, because checking a path and then opening it leaves a
+# window in which the two are different files. Writing never opens the
+# destination at all: it fills a temporary in the same directory and renames it
+# over the top, and rename(2) replaces the name itself, so a symlink planted
+# there is overwritten rather than followed.
+
+PRIVATE_MAX_BYTES=262144
+
+private_read() { # private_read <file>; its bytes, or nothing
+  local f="${1:-}" fd uid mode
+  [[ -n $f ]] || return 1
+  exec {fd}< "$f" 2>/dev/null || return 1
+  # Everything below asks about the descriptor already open, not about $f.
+  # /proc/self/fd/N resolves to the inode this process is holding, whatever the
+  # name has become since.
+  if [[ ! -f /proc/self/fd/$fd ]]; then exec {fd}<&-; return 1; fi
+  read -r uid mode < <(stat -L -c '%u %a' "/proc/self/fd/$fd" 2>/dev/null) \
+    || { exec {fd}<&-; return 1; }
+  # Ours, and private. A credential file that anyone else can read is not one
+  # we should go on using as though it were secret.
+  if [[ $uid != "$EUID" ]] || (( 8#$mode & 8#077 )); then
+    exec {fd}<&-; return 1
+  fi
+  head -c "$PRIVATE_MAX_BYTES" <&"$fd"
+  exec {fd}<&-
+}
+
+private_write() { # private_write <file>; content on stdin
+  local f="${1:-}" dir tmp
+  [[ -n $f ]] || return 1
+  dir="${f%/*}"; [[ $dir == "$f" ]] && dir="."
+  ( umask 077; mkdir -p "$dir" ) || return 1
+  tmp="$(mktemp "$dir/.tmp.XXXXXX")" || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  cat > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+}
+
+# A hand-written config is shell-shaped because that is what people expect to
+# write, but reading it is not a reason to run it. This picks a value out of
+# KEY=VALUE text: last assignment wins, the way sourcing would have behaved,
+# and nothing in the file is ever executed.
+conf_value() { # conf_value <file> <key>; the value, or nothing
+  local f="${1:-}" key="${2:-}" v
+  [[ -n $f && -n $key ]] || return 1
+  v="$(private_read "$f" 2>/dev/null | awk -v k="$key" '
+        { sub(/\r$/, "") }
+        $0 ~ "^[[:space:]]*(export[[:space:]]+)?" k "=" {
+          sub("^[[:space:]]*(export[[:space:]]+)?" k "=", ""); val = $0
+        }
+        END { if (val != "") print val }')" || return 1
+  [[ -n $v ]] || return 1
+  # One layer of matching quotes, since that is how a config is often written.
+  case "$v" in
+    \"*\") v="${v#\"}"; v="${v%\"}" ;;
+    \'*\') v="${v#\'}"; v="${v%\'}" ;;
+  esac
+  printf '%s' "$v"
+}
+
+# ── Credentials as data ─────────────────────────────────────────────────────
+# A token reaches curl inside a config file, where a quote or a newline would
+# end the value and start a fresh directive — one that could re-route the very
+# request carrying the credential. Escaping for that syntax is possible and
+# easy to get subtly wrong, so nothing is escaped: a value outside the set
+# every real Plex and Twitch token is drawn from is refused instead. The same
+# set is safe as an HTTP header value, which is the other place these go.
+TOKEN_MAX_LEN=512
+
+# Remote text that reaches a terminal, stripped of the bytes that could move
+# the cursor or repaint the line. Done once, on the way in, so everything
+# downstream is already safe to print.
+safe_text() { # safe_text <value>
+  printf '%s' "${1:-}" | tr -d '\000-\010\013\014\016-\037\177' | head -c 200
+}
+
+# A count from a remote response that is not a plain number is not a count.
+# Bash re-evaluates a variable's contents inside (( )), so an unchecked value
+# from a response body is an expression, not just a number.
+num_or() { # num_or <value> <default>
+  [[ ${1:-} =~ ^[0-9]{1,9}$ ]] && printf '%s' "$1" || printf '%s' "${2:-0}"
+}
+
+# A value that becomes part of a query string. Anything outside this set could
+# end the parameter and begin another one, which is a different request from
+# the one being made.
+url_safe() { # url_safe <value>
+  [[ ${1:-} =~ ^[A-Za-z0-9._~-]{1,128}$ ]]
+}
+
+# A path a remote response asked for. It has to stay under the root it was
+# given: no climbing out, no query of its own, nothing that ends an argument.
+valid_path_ref() { # valid_path_ref <path>
+  local r="${1:-}"
+  [[ $r == /* && ${#r} -le 512 ]] || return 1
+  [[ $r != *".."* ]] || return 1
+  [[ $r =~ ^[A-Za-z0-9._~/%+-]+$ ]]
+}
+
+valid_token() { # valid_token <value>
+  local t="${1:-}"
+  (( ${#t} > 0 && ${#t} <= TOKEN_MAX_LEN )) || return 1
+  [[ $t =~ ^[A-Za-z0-9._~+/=-]+$ ]]
+}
+
 # ── Hyprland ────────────────────────────────────────────────────────────────
 # Hyprland 0.56 parses `hyprctl dispatch` arguments as Lua and wraps them in
 # hl.dispatch(...), so dispatchers are built with hl.dsp.* rather than passed as

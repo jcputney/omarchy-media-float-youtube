@@ -1,0 +1,15 @@
+# Installed by setup as <plugin-id>.desktop, so the launcher has a way in that
+# does not depend on a keybinding. StartupNotify is off on purpose: the picker
+# is a layer surface, so no toplevel window ever maps and a launcher waiting for
+# one would spin until it gave up.
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=YouTube Float
+Comment=Browse YouTube subscriptions and playlists, play in a floating, pinned window
+Exec=youtube-float browse
+Icon=applications-multimedia
+Terminal=false
+StartupNotify=false
+Categories=AudioVideo;Video;Player;
+Keywords=youtube;video;subscriptions;playlist;float;overlay;

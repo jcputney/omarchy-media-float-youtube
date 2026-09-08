@@ -27,6 +27,9 @@ END_MARK="-- <<< media-float <<<"
 NAME="$(jq -r '.name // "media-float"' "$HERE/manifest.json")"
 PLUGIN_ID="$(jq -r '.id // ""' "$HERE/manifest.json")"
 
+APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+DESKTOP_FILE="$APP_DIR/$PLUGIN_ID.desktop"
+
 say()  { printf '  %s\n' "$*"; }
 head2() { printf '\n%s\n' "$*"; }
 die()  { printf 'setup: %s\n' "$*" >&2; exit 1; }
@@ -181,6 +184,7 @@ remove_cmds() {
     [[ -e $target ]] || continue
     rm -f "$target" && say "removed $target"
   done
+  remove_desktop
   if [[ $(installed_siblings) -gt 0 ]]; then
     say "kept $LIB_DIR/float-overlay.sh — another media-float tool still uses it"
   else
@@ -192,6 +196,45 @@ remove_cmds() {
     done
     remove_hypr
   fi
+}
+
+# ── Launcher entry ──────────────────────────────────────────────────────────
+# Without this the only way in is a keybinding you wrote yourself or a terminal,
+# and someone who skipped the bindings section of the README ends up with a
+# working install and no way to reach it.
+#
+# The file is named after the plugin id rather than the tool: `gtk-launch`, which
+# is what the Omarchy launcher runs, finds an entry by file name, and a plain
+# YouTube.desktop would collide with Omarchy's own web-app entry for youtube.com.
+refresh_desktop_db() {
+  # Most launchers read the directory. The ones that keep a cache treat a stale
+  # entry as missing rather than as an error, so this is a courtesy, not a step.
+  command -v update-desktop-database >/dev/null 2>&1 \
+    && update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
+}
+
+install_desktop() {
+  [[ -n $PLUGIN_ID ]] || return 0
+  [[ -f $HERE/app.desktop ]] || return 0
+  # The launcher hands the entry to gtk-launch inside the systemd user session,
+  # whose PATH is not the one your shell has. Pinning Exec to the directory the
+  # command was just installed into rules out the worst failure this could have:
+  # a launcher entry that silently does nothing, with no terminal to say why.
+  local tmp; tmp="$(mktemp)"
+  sed "s|^Exec=|Exec=$BIN_DIR/|" "$HERE/app.desktop" > "$tmp"
+  install -Dm644 "$tmp" "$DESKTOP_FILE"
+  rm -f "$tmp"
+  say "installed $DESKTOP_FILE"
+  refresh_desktop_db
+}
+
+remove_desktop() {
+  # Guarded on the id because without one DESKTOP_FILE is a bare ".desktop" in a
+  # directory full of other people's entries.
+  [[ -n $PLUGIN_ID ]] || return 0
+  [[ -e $DESKTOP_FILE ]] || return 0
+  rm -f "$DESKTOP_FILE" && say "removed $DESKTOP_FILE"
+  refresh_desktop_db
 }
 
 # ── Report ──────────────────────────────────────────────────────────────────
@@ -211,6 +254,8 @@ cmd_check() {
       || say "absent   browser for guided sign-in (auth --manual still works)"
   fi
   [[ -f $HYPR_RULES ]] && say "ok       $HYPR_RULES" || say "MISSING  $HYPR_RULES"
+  [[ -f $DESKTOP_FILE ]] && say "ok       $DESKTOP_FILE" \
+    || say "MISSING  $DESKTOP_FILE (launcher entry)"
   if [[ -n $PLUGIN_ID ]] && command -v omarchy >/dev/null 2>&1; then
     omarchy plugin list --json 2>/dev/null \
       | jq -e --arg i "$PLUGIN_ID" 'any(.[]; .id == $i and (.enabled // false))' >/dev/null 2>&1 \
@@ -240,6 +285,11 @@ first_run_hint() {
       say "Watch Later, history and playlists do not."
       ;;
   esac
+}
+
+launcher_hint() {
+  head2 "In the app launcher:"
+  say "\"$NAME\" opens the picker, so a keybinding is optional."
 }
 
 bindings_hint() {
@@ -273,6 +323,7 @@ case "${1:-install}" in
     head2 "Installing $NAME"
     check_deps
     install_cmds
+    install_desktop
     install_hypr
     hyprctl reload >/dev/null 2>&1 || true
     # The shell caches plugin QML once loaded; a rescan alone will not pick up a
@@ -283,6 +334,7 @@ case "${1:-install}" in
       say "omarchy restart shell"
     fi
     first_run_hint
+    launcher_hint
     bindings_hint
     ;;
   *)

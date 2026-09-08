@@ -50,7 +50,7 @@ ytdl() { # ytdl <url> [extra yt-dlp args…]; echoes the flat-playlist JSON
   if [[ -s $COOKIES ]]; then
     # yt-dlp writes the jar back over the file it is given, and YouTube's
     # session rotation would then invalidate the saved copy. Hand it a throwaway.
-    install -m 600 "$COOKIES" "$RUN_DIR/yt-cookies.txt"
+    private_write "$RUN_DIR/yt-cookies.txt" < "$COOKIES"
     jar=(--cookies "$RUN_DIR/yt-cookies.txt")
   fi
   yt-dlp "${jar[@]}" --flat-playlist --no-warnings --ignore-errors \
@@ -214,7 +214,7 @@ cmd_detail() { # cmd_detail <picked-value>; the extra facts, or nothing
   if [[ -s $COOKIES ]]; then
     # Its own copy: yt-dlp rewrites the jar it is handed, and a browse running
     # at the same time is using the other one.
-    install -m 600 "$COOKIES" "$RUN_DIR/yt-cookies-detail.txt"
+    private_write "$RUN_DIR/yt-cookies-detail.txt" < "$COOKIES"
     jar=(--cookies "$RUN_DIR/yt-cookies-detail.txt")
   fi
 
@@ -412,7 +412,12 @@ cmd_browse() { # cmd_browse [--resume]
 
 # ── Playback ────────────────────────────────────────────────────────────────
 
-height() { cat "$QUALITY_FILE" 2>/dev/null || echo "$DEFAULT_HEIGHT"; }
+# It is spliced into a yt-dlp format selector and handed to mpv. Ours to write,
+# so ours to check; anything else falls back to the default.
+height() {
+  local h; h="$(cat "$QUALITY_FILE" 2>/dev/null | head -1 || true)"
+  [[ $h == "best" || $h =~ ^[0-9]{2,5}$ ]] && printf '%s' "$h" || printf '%s' "$DEFAULT_HEIGHT"
+}
 
 ytdl_format() {
   local h; h="$(height)"
@@ -431,7 +436,7 @@ cmd_session() { # cmd_session <video-id> <title> [browse]
   trap 'trap - EXIT; rm -f "$PID_FILE"; kill -- "-$$" 2>/dev/null || true' EXIT
 
   if [[ -s $COOKIES ]]; then
-    install -m 600 "$COOKIES" "$RUN_DIR/yt-cookies-play.txt"
+    private_write "$RUN_DIR/yt-cookies-play.txt" < "$COOKIES"
     raw=(--ytdl-raw-options="cookies=$RUN_DIR/yt-cookies-play.txt")
   fi
 
@@ -473,6 +478,8 @@ cmd_play() { # cmd_play <id|url>
 cmd_quality() { # cmd_quality <720|best|toggle>
   local want="${1:-toggle}" cur; cur="$(height)"
   [[ $want == "toggle" ]] && { [[ $cur == "best" ]] && want="$DEFAULT_HEIGHT" || want="best"; }
+  [[ $want == "best" || $want =~ ^[0-9]{2,5}$ ]] \
+    || die "Not a video height: $want (try best, or a number like 720)"
   printf '%s\n' "$want" > "$QUALITY_FILE"
   note "YouTube quality: $([[ $want == best ]] && echo "source" || echo "${want}p")"
 
@@ -596,9 +603,13 @@ EOF
   fi
 
   if COOKIES="$jar" signed_in; then
-    ( umask 077; mkdir -p "$(dirname "$COOKIES")" )
-    mv "$jar" "$COOKIES"
-    chmod 600 "$COOKIES"
+    # The jar is on tmpfs and the destination is not, so this was a copy that
+    # followed whatever $COOKIES had become and only then set the mode. Writing
+    # it through a temporary in the destination's own directory means the file
+    # is private before it has a name, and the name is replaced rather than
+    # followed.
+    private_write "$COOKIES" < "$jar" || die "Could not write $COOKIES"
+    rm -f "$jar"
     note "YouTube: signed in."
     printf 'Signed in. Subscriptions, Watch Later and history are available.\n'
     printf 'Renew later with `youtube-float auth --refresh`; the profile is kept,\n'
