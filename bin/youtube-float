@@ -141,12 +141,15 @@ JQ_PLAYLISTS="$JQ_DEFS"'
 nav_row() { printf '%s\t-\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"; }
 
 # Thumbnails and avatars come from Google's image hosts and nowhere else. A
-# feed is remote data, so the URL in it is checked against this list before
-# anything fetches it, and the fetch itself is bounded.
+# feed is remote data, so this is asked about the URL in it and again about
+# every redirect target, and the address behind each host has to be a public
+# one. The fetch itself is bounded.
+fetch_guard() { # fetch_guard <url>
+  host_allowed "${1:-}" ytimg.com ggpht.com googleusercontent.com
+}
+
 resolve_image() { # resolve_image <url>; echoes a local file
-  local url="${1:-}"
-  host_allowed "$url" ytimg.com ggpht.com googleusercontent.com || return 1
-  cache_image "$url" --proto '=https'
+  cache_image "${1:-}"
 }
 
 # ── Row detail ──────────────────────────────────────────────────────────────

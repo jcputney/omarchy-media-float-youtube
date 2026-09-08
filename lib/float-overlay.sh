@@ -322,20 +322,105 @@ FETCH_MAX_BYTES=8388608    # 8 MiB — far above any poster or thumbnail
 # still a hard stop. Tools with smaller answers narrow it locally.
 API_MAX_BYTES=33554432
 
+# Where a fetch is allowed to go. Each tool overrides this, and it is asked
+# again about every redirect target, so a redirect cannot walk out of the policy
+# the first URL satisfied. Deny by default: a tool that has not thought about it
+# fetches nothing.
+fetch_guard() { return 1; }
+
+# Refuses anything that is not a public address. Loopback and the private
+# ranges are where a redirect would point to reach something on this machine or
+# this network that the tool has no business reading.
+is_public_ip() { # is_public_ip <address>
+  local ip="${1:-}"
+  case "$ip" in
+    ""|0.0.0.0|255.255.255.255) return 1 ;;
+    127.*|10.*|192.168.*|169.254.*) return 1 ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 1 ;;
+    100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 1 ;;  # CGNAT
+    ::1|::) return 1 ;;
+    [fF][cCdD]*:*) return 1 ;;   # unique local
+    [fF][eE][89abAB]*:*) return 1 ;;   # link local
+    ::[fF][fF][fF]:*) return 1 ;;      # v4-mapped: judge it as v4 instead
+    *) return 0 ;;
+  esac
+}
+
+# Resolves the host once, checks that address, and hands back a --resolve pin so
+# the request goes to the address that was checked. Without the pin a second
+# lookup could answer differently and land somewhere the check never saw.
+public_pin() { # public_pin <host> <port>; echoes host:port:address
+  local host="$1" port="$2" ip
+  while read -r ip; do
+    [[ -n $ip ]] || continue
+    is_public_ip "$ip" || return 1
+    printf '%s:%s:%s\n' "$host" "$port" "$ip"
+    return 0
+  done < <(getent ahosts "$host" 2>/dev/null | awk '{print $1}' | sort -u)
+  return 1
+}
+
+url_host() { local u="${1#*://}"; u="${u%%/*}"; u="${u%%\?*}"; printf '%s' "${u%%:*}"; }
+url_scheme() { printf '%s' "${1%%://*}"; }
+url_port() {
+  local a="${1#*://}"; a="${a%%/*}"; a="${a%%\?*}"
+  case "$a" in
+    *:*) printf '%s' "${a##*:}" ;;
+    *)   [[ $(url_scheme "$1") == https ]] && printf '443' || printf '80' ;;
+  esac
+}
+
+# Redirects are followed by hand, one hop at a time. curl cannot be asked to
+# check where it is going, and -L would carry a custom header — a Plex token is
+# a custom header — to whatever host a redirect names. curl strips
+# Authorization across origins; it does not strip anything else.
+FETCH_MAX_HOPS=3
+
 bounded_fetch() { # bounded_fetch <out-file> <url> [extra curl args…]
   local out="$1" url="$2"; shift 2
-  local tmp
+  local tmp hdr hop=0 code loc pin host port
   tmp="$(mktemp "$out.XXXXXX")" || return 1
-  if curl -fsSL "$@" \
-       --connect-timeout "$FETCH_CONNECT_TIMEOUT" \
-       --max-time "$FETCH_MAX_TIME" \
-       --max-filesize "$FETCH_MAX_BYTES" \
-       "$url" 2>/dev/null \
-     | head -c "$FETCH_MAX_BYTES" > "$tmp" && [[ -s $tmp ]]; then
-    mv -f "$tmp" "$out"
-    return 0
-  fi
-  rm -f "$tmp"
+  hdr="$tmp.hdr"
+
+  while :; do
+    fetch_guard "$url" || { rm -f "$tmp" "$hdr"; return 1; }
+
+    pin=()
+    host="$(url_host "$url")"; port="$(url_port "$url")"
+    if [[ ${FETCH_REQUIRE_PUBLIC:-1} == 1 ]]; then
+      local spec
+      spec="$(public_pin "$host" "$port")" || { rm -f "$tmp" "$hdr"; return 1; }
+      pin=(--resolve "$spec")
+    fi
+
+    : > "$hdr"
+    curl -sS "$@" "${pin[@]}" \
+      --proto '=https,http' --max-redirs 0 \
+      --connect-timeout "$FETCH_CONNECT_TIMEOUT" \
+      --max-time "$FETCH_MAX_TIME" \
+      --max-filesize "$FETCH_MAX_BYTES" \
+      -D "$hdr" "$url" 2>/dev/null \
+    | head -c "$FETCH_MAX_BYTES" > "$tmp"
+
+    code="$(awk 'toupper($1) ~ /^HTTP/ { c = $2 } END { print c }' "$hdr")"
+    case "$code" in
+      30[1237])
+        (( hop++ < FETCH_MAX_HOPS )) || break
+        loc="$(awk 'tolower($1) == "location:" { $1 = ""; sub(/^ /, ""); print }' "$hdr" \
+               | tr -d "\r" | tail -1)"
+        case "$loc" in
+          http://*|https://*) url="$loc" ;;
+          /*)                 url="$(url_scheme "$url")://$host:$port$loc" ;;
+          *)                  break ;;   # relative or absent: refuse to guess
+        esac
+        continue
+        ;;
+      2*) [[ -s $tmp ]] && { mv -f "$tmp" "$out"; rm -f "$hdr"; return 0; } ;;
+    esac
+    break
+  done
+
+  rm -f "$tmp" "$hdr"
   return 1
 }
 
@@ -364,7 +449,8 @@ host_allowed() { # host_allowed <url> <allowed-host>…
 }
 
 # Downloads once, then serves the copy. A refresh that fails keeps the old file
-# rather than blanking artwork that was fine a moment ago.
+# rather than blanking artwork that was fine a moment ago. Where it is allowed
+# to fetch from is fetch_guard's decision, on every hop.
 cache_image() { # cache_image <url> [extra curl args…]; echoes the local path
   local url="$1"; shift
   local f
