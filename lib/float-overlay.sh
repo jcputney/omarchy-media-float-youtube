@@ -316,6 +316,17 @@ THUMB_TTL=300   # live thumbnails go stale; refetch after this many seconds
 # second time on the way in.
 FETCH_CONNECT_TIMEOUT=5
 FETCH_MAX_TIME=15
+
+# Secret-bearing curl options — an auth header, a form field — go here rather
+# than in argv, which any process of this user can read out of /proc for as
+# long as the request runs. It is fed to curl as a config on stdin, written by
+# a shell builtin so there is no second process whose arguments could be read
+# either. Callers set it with `local` so it dies with the function.
+#
+# Each redirect hop is its own curl invocation with its own copy of this, and
+# each hop is re-checked by fetch_guard first, so a credential cannot be
+# carried across an authority change the guard would refuse.
+FETCH_CURL_CONFIG=""
 FETCH_MAX_BYTES=8388608    # 8 MiB — far above any poster or thumbnail
 # 32 MiB. A real Plex movie library answers /library/sections/<k>/all with
 # about 5 MiB, so this is roughly six times the largest honest response and
@@ -394,7 +405,8 @@ bounded_fetch() { # bounded_fetch <out-file> <url> [extra curl args…]
     fi
 
     : > "$hdr"
-    curl -sS "$@" "${pin[@]}" \
+    printf '%s' "${FETCH_CURL_CONFIG:-}" \
+    | curl -sS -K - "$@" "${pin[@]}" \
       --proto '=https,http' --max-redirs 0 \
       --connect-timeout "$FETCH_CONNECT_TIMEOUT" \
       --max-time "$FETCH_MAX_TIME" \
@@ -428,11 +440,12 @@ bounded_fetch() { # bounded_fetch <out-file> <url> [extra curl args…]
 # hand it to jq, so the ceiling has to apply before that, not after.
 bounded_body() { # bounded_body <url> [extra curl args…]
   local url="$1"; shift
-  curl -fsS "$@" \
-    --connect-timeout "$FETCH_CONNECT_TIMEOUT" \
-    --max-time "$FETCH_MAX_TIME" \
-    --max-filesize "$API_MAX_BYTES" \
-    "$url" 2>/dev/null | head -c "$API_MAX_BYTES"
+  printf '%s' "${FETCH_CURL_CONFIG:-}" \
+  | curl -fsS -K - "$@" \
+      --connect-timeout "$FETCH_CONNECT_TIMEOUT" \
+      --max-time "$FETCH_MAX_TIME" \
+      --max-filesize "$API_MAX_BYTES" \
+      "$url" 2>/dev/null | head -c "$API_MAX_BYTES"
 }
 
 # An https URL whose host is one of the ones named, or a subdomain of one.
