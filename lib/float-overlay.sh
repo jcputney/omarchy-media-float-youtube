@@ -309,6 +309,86 @@ PICKER_OUT="$RUN_DIR/picker.out"
 THUMB_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/float-overlay/thumbs"
 THUMB_TTL=300   # live thumbnails go stale; refetch after this many seconds
 
+# ── Fetching remote bytes ───────────────────────────────────────────────────
+# Nothing reads a remote body without all three bounds. A deadline alone still
+# lets a fast server hand back gigabytes, and --max-filesize only refuses a
+# response that declares its length up front, so the ceiling is enforced a
+# second time on the way in.
+FETCH_CONNECT_TIMEOUT=5
+FETCH_MAX_TIME=15
+FETCH_MAX_BYTES=8388608    # 8 MiB — far above any poster or thumbnail
+# 32 MiB. A real Plex movie library answers /library/sections/<k>/all with
+# about 5 MiB, so this is roughly six times the largest honest response and
+# still a hard stop. Tools with smaller answers narrow it locally.
+API_MAX_BYTES=33554432
+
+bounded_fetch() { # bounded_fetch <out-file> <url> [extra curl args…]
+  local out="$1" url="$2"; shift 2
+  local tmp
+  tmp="$(mktemp "$out.XXXXXX")" || return 1
+  if curl -fsSL "$@" \
+       --connect-timeout "$FETCH_CONNECT_TIMEOUT" \
+       --max-time "$FETCH_MAX_TIME" \
+       --max-filesize "$FETCH_MAX_BYTES" \
+       "$url" 2>/dev/null \
+     | head -c "$FETCH_MAX_BYTES" > "$tmp" && [[ -s $tmp ]]; then
+    mv -f "$tmp" "$out"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Reads a bounded API body. Callers buffer the whole thing into a variable and
+# hand it to jq, so the ceiling has to apply before that, not after.
+bounded_body() { # bounded_body <url> [extra curl args…]
+  local url="$1"; shift
+  curl -fsS "$@" \
+    --connect-timeout "$FETCH_CONNECT_TIMEOUT" \
+    --max-time "$FETCH_MAX_TIME" \
+    --max-filesize "$API_MAX_BYTES" \
+    "$url" 2>/dev/null | head -c "$API_MAX_BYTES"
+}
+
+# An https URL whose host is one of the ones named, or a subdomain of one.
+# Anything else — another scheme, another host, a bare path — is refused.
+host_allowed() { # host_allowed <url> <allowed-host>…
+  local url="$1" host h; shift
+  [[ $url == https://* ]] || return 1
+  host="${url#https://}"; host="${host%%/*}"; host="${host%%\?*}"; host="${host%%:*}"
+  [[ -n $host ]] || return 1
+  for h in "$@"; do
+    [[ $host == "$h" || $host == *".$h" ]] && return 0
+  done
+  return 1
+}
+
+# Downloads once, then serves the copy. A refresh that fails keeps the old file
+# rather than blanking artwork that was fine a moment ago.
+cache_image() { # cache_image <url> [extra curl args…]; echoes the local path
+  local url="$1"; shift
+  local f
+  mkdir -p "$THUMB_DIR"
+  f="$THUMB_DIR/$(printf %s "$url" | md5sum | cut -c1-32).img"
+  if [[ ! -s $f ]] \
+     || (( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) > THUMB_TTL )); then
+    bounded_fetch "$f" "$url" "$@" || [[ -s $f ]] || return 1
+  fi
+  printf '%s\n' "$f"
+}
+
+# ── Tool hooks ──────────────────────────────────────────────────────────────
+# A row's image column is an opaque reference, not a URL: only the tool knows
+# whether it is a Plex library path needing an auth header or a CDN link that
+# must match an allowlist. The tool turns it into a local file; nothing else
+# ever hands a remote URL to an image loader.
+resolve_image() { return 1; }
+
+# Tools with facts too slow to bake into a row list override this. It receives
+# the row's value columns and prints what it has, or nothing.
+detail_for() { return 0; }
+FLOAT_HAS_DETAIL=0
+
 # Colours come from the live Omarchy theme, so the menu follows `omarchy theme
 # set` without being touched.
 theme_color() { # theme_color <key> <fallback>
@@ -346,34 +426,31 @@ overlay_picker_available() {
         'any(.[]; .id == $i and (.enabled // false))' >/dev/null 2>&1
 }
 
-rows_to_json() { # rows_to_json <tsv-file>
-  jq -R -s --arg pre "${FLOAT_PICKER_IMAGE_PREFIX:-}" \
-           --arg suf "${FLOAT_PICKER_IMAGE_SUFFIX:-}" '
-    split("\n")[] | select(length > 0) | split("\t")
-    | { label: (.[0] // ""),
-        image: ( (.[1] // "-") as $i
-                 | if $i == "-" or $i == "" then ""
-                   elif ($i | startswith("/")) then $pre + $i + $suf
-                   else $i end ),
-        info:  ((.[2] // "") | gsub("\u001f"; "\n")),
-        value: (.[3:] | join("\t")) }' "$1" | jq -s .
-}
-
-# ── Per-row detail ──────────────────────────────────────────────────────────
-# Some facts are too expensive to bake into every row. A YouTube like count
-# costs a full extraction — about two seconds — which is fine for one row and
-# unusable for forty. A tool that has such facts exports FLOAT_DETAIL_CMD;
-# both backends then run it for the row the cursor is actually resting on and
-# print what comes back under that row's own info.
+# The image column stays an opaque reference here. It used to be turned into a
+# URL with the caller's prefix and suffix, which is how a Plex token ended up in
+# this file and then in an image loader; now the tool resolves it to a local
+# file, one row at a time.
 #
-# The command gets one argument, the row's value columns joined by tabs, and is
-# expected to print nothing for rows it has nothing to add.
-: "${FLOAT_DETAIL_CMD:=}"
+# Every string is capped and the array is capped. A row file is written by the
+# tool a few lines above, so this is not where an attack starts — but it is what
+# the picker parses, and a parser with no limits is one bad feed away from
+# holding the whole shell.
+ROWS_MAX=5000
+ROWS_LABEL_MAX=512
+ROWS_IMAGE_MAX=1024
+ROWS_INFO_MAX=8192
+ROWS_VALUE_MAX=1024
 
-# One argument in, so a value with spaces or quotes in it stays one argument.
-run_detail() { # run_detail <value>
-  [[ -n ${FLOAT_DETAIL_CMD:-} && -n ${1:-} ]] || return 0
-  sh -c "$FLOAT_DETAIL_CMD \"\$1\"" sh "$1" 2>/dev/null || true
+rows_to_json() { # rows_to_json <tsv-file>
+  jq -R -s \
+    --argjson n "$ROWS_MAX" --argjson lm "$ROWS_LABEL_MAX" \
+    --argjson im "$ROWS_IMAGE_MAX" --argjson fm "$ROWS_INFO_MAX" \
+    --argjson vm "$ROWS_VALUE_MAX" '
+    [ split("\n")[] | select(length > 0) | split("\t")
+      | { label:    ((.[0] // "")[0:$lm]),
+          imageRef: ((.[1] // "-") | if . == "-" then "" else .[0:$im] end),
+          info:     (((.[2] // "") | gsub("\u001f"; "\n"))[0:$fm]),
+          value:    ((.[3:] | join("\t"))[0:$vm]) } ][0:$n]' "$1"
 }
 
 # ── Going back ──────────────────────────────────────────────────────────────
@@ -426,10 +503,13 @@ summon_pick() { # summon_pick <rows-file> <prompt> [back]; echoes the chosen val
   [[ ${3:-} == back ]] && backv="$FLOAT_BACK"
   ( umask 077; rows_to_json "$1" > "$rowsf" ) || return 1
   rm -f "$don"; : > "$sel"
+  # The payload says whether to ask for detail, never what to run. The picker
+  # builds the argv itself from the plugin it was loaded out of, so a payload
+  # from anywhere else cannot name a program.
   payload="$(jq -nc --arg r "$rowsf" --arg s "$sel" --arg d "$don" --arg p "$2" \
-    --arg b "$backv" --arg c "${FLOAT_DETAIL_CMD:-}" \
+    --arg b "$backv" --argjson dt "$([[ ${FLOAT_HAS_DETAIL:-0} == 1 ]] && echo true || echo false)" \
     '{rowsFile:$r, selectionFile:$s, doneFile:$d, prompt:$p, backValue:$b,
-      detailCommand:$c}')"
+      detail:$dt}')"
   omarchy-shell shell summon "$PICKER_PLUGIN_ID" "$payload" >/dev/null 2>&1 || return 1
   await_pick "$sel" "$don"
 }
@@ -526,16 +606,12 @@ fzf_ask() { # fzf_ask <prompt>; free text typed by the user
       < /dev/null 2>/dev/null | head -1
 }
 
-render_preview() { # render_preview <image-url|-> <info|-> [raw-row]
-  local url="${1:--}" info="${2:--}" row="${3:-}" cols lines rows f
+render_preview() { # render_preview <image-ref|-> <info|-> [raw-row]
+  local ref="${1:--}" info="${2:--}" row="${3:-}" cols lines rows f
   cols=${FZF_PREVIEW_COLUMNS:-40}
   lines=${FZF_PREVIEW_LINES:-20}
-  if [[ $url != "-" ]]; then
-    mkdir -p "$THUMB_DIR"
-    f="$THUMB_DIR/$(printf %s "$url" | md5sum | cut -c1-32).img"
-    if [[ ! -s $f ]] || (( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) > THUMB_TTL )); then
-      curl -fsSL --max-time 8 -o "$f" "$url" 2>/dev/null || true
-    fi
+  if [[ $ref != "-" && -n $ref ]]; then
+    f="$(resolve_image "$ref" 2>/dev/null || true)"
     # Leave room under the image for the text block.
     rows=$(( lines * 55 / 100 ))
     (( rows < 6 )) && rows=6
@@ -563,9 +639,9 @@ render_preview() { # render_preview <image-url|-> <info|-> [raw-row]
   fi
   # fzf kills the running preview when the cursor moves on, so a slow lookup
   # only ever finishes for the row someone stopped at. That is the debounce.
-  if [[ -n $row ]]; then
+  if [[ -n $row && ${FLOAT_HAS_DETAIL:-0} == 1 ]]; then
     local detail
-    detail="$(run_detail "$(printf '%s' "$row" | cut -f4-)")"
+    detail="$(detail_for "$(printf '%s' "$row" | cut -f4-)" 2>/dev/null || true)"
     if [[ -n $detail ]]; then
       printf '\n%s\n' "$detail" | fold -s -w "$cols"
     fi

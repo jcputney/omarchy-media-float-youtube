@@ -26,9 +26,9 @@ export FLOAT_PICKER_PLUGIN_ID
 source "$HOME/.local/lib/float-overlay.sh"
 
 # Like counts and upload dates cost a full extraction, so they cannot ride
-# along in the row list. The picker asks for them one row at a time instead.
-FLOAT_DETAIL_CMD="$(printf '%q' "$SELF") _detail"
-export FLOAT_DETAIL_CMD
+# along in the row list. This says only that there is something worth asking
+# for; the picker decides what to run, out of its own plugin directory.
+FLOAT_HAS_DETAIL=1
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/youtube-float"
 COOKIES="$CONFIG_DIR/cookies.txt"
@@ -65,8 +65,13 @@ signed_in() {
   # account. Take the pipeline's status from grep alone.
   local ok
   set +o pipefail
-  curl -sS --compressed --max-time 30 -b "$COOKIES" -A "$UA" \
+  # grep -m1 stops at the match, but a response that never matches would be
+  # read forever, so the body is capped on the way in as well.
+  curl -sS --compressed -b "$COOKIES" -A "$UA" \
+    --connect-timeout "$FETCH_CONNECT_TIMEOUT" --max-time 30 \
+    --max-filesize "$FETCH_MAX_BYTES" \
     "https://www.youtube.com/feed/subscriptions" 2>/dev/null \
+    | head -c "$FETCH_MAX_BYTES" \
     | grep -qm1 '"LOGGED_IN":true'
   ok=$?
   set -o pipefail
@@ -135,6 +140,15 @@ JQ_PLAYLISTS="$JQ_DEFS"'
 
 nav_row() { printf '%s\t-\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"; }
 
+# Thumbnails and avatars come from Google's image hosts and nowhere else. A
+# feed is remote data, so the URL in it is checked against this list before
+# anything fetches it, and the fetch itself is bounded.
+resolve_image() { # resolve_image <url>; echoes a local file
+  local url="${1:-}"
+  host_allowed "$url" ytimg.com ggpht.com googleusercontent.com || return 1
+  cache_image "$url" --proto '=https'
+}
+
 # ── Row detail ──────────────────────────────────────────────────────────────
 # A flat playlist listing is one request for the whole page, which is why the
 # rows above carry only what it returns: title, channel, duration, view count.
@@ -174,6 +188,12 @@ JQ_DETAIL='
       ((.tags // []) | .[0:8] | join(", ")) ]
   | map(select(. != null and . != "")) | join("\n")'
 
+DETAIL_MAX_BYTES=4096   # the preview pane shows a handful of lines, not a file
+
+detail_for() { # detail_for <picked-value>; the extra facts, or nothing
+  cmd_detail "${1:-}" | head -c "$DETAIL_MAX_BYTES"
+}
+
 cmd_detail() { # cmd_detail <picked-value>; the extra facts, or nothing
   local action id f out jar=()
   # Only video rows have anything to add. Channels, playlists, the nav rows and
@@ -199,7 +219,7 @@ cmd_detail() { # cmd_detail <picked-value>; the extra facts, or nothing
   # the size of the download your quality setting would start, not of whatever
   # yt-dlp would pick by default. The timeout is for live streams, which can
   # otherwise sit there.
-  out="$(timeout 25 yt-dlp "${jar[@]}" --no-playlist --skip-download \
+  out="$(timeout -k 5 25 yt-dlp "${jar[@]}" --no-playlist --skip-download \
         --no-warnings --ignore-errors --socket-timeout 10 \
         -f "$(ytdl_format)" -J "https://www.youtube.com/watch?v=$id" 2>/dev/null \
       | jq -r "$JQ_DETAIL" 2>/dev/null)" || true
@@ -636,7 +656,8 @@ case "${1:-browse}" in
   browse)      shift || true; cmd_browse "${1:-}" ;;
   _browse_tui) cmd_browse_tui ;;
   _preview)    shift || true; render_preview "${1:--}" "${2:--}" "${3:-}" ;;
-  _detail)     shift || true; cmd_detail "${1:-}" ;;
+  _detail)     shift || true; detail_for "${1:-}" ;;
+  _thumb)      shift || true; resolve_image "${1:-}" ;;
   play)        shift; cmd_play "${1:?video id or URL required}" ;;
   quality)     shift || true; cmd_quality "${1:-toggle}" ;;
   auth)        shift || true; cmd_auth "${1:-}" ;;
