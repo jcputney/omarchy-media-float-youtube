@@ -741,7 +741,12 @@ summon_ask() { # summon_ask <prompt>; free text typed into the overlay
 # re-probe: `omarchy plugin list` is slow, and a mid-navigation flip would strand
 # a menu between backends.
 
-run_menu() { # run_menu <command-string>; echoes whatever the TUI emitted
+# The menu is named as a command and its arguments, not as a string for a shell
+# to parse. It only ever re-enters this tool at one of its own _tui entry
+# points, so there was nothing for a shell to add — only a way for a path with
+# a space in it to become two words, and a construct that reads like an
+# arbitrary-command sink to anything auditing this.
+run_menu() { # run_menu <command> [args…]; echoes whatever the TUI emitted
   : > "$PICKER_OUT"
   if [[ -z ${FLOAT_PICKER_MODE:-} ]]; then
     if overlay_picker_available; then FLOAT_PICKER_MODE=overlay
@@ -749,10 +754,10 @@ run_menu() { # run_menu <command-string>; echoes whatever the TUI emitted
   fi
   if [[ $FLOAT_PICKER_MODE == overlay ]]; then
     FLOAT_PICKER_MODE=overlay FLOAT_PICKER_OUT="$PICKER_OUT" \
-      sh -c "$1" >/dev/null 2>&1 || true
+      "$@" >/dev/null 2>&1 || true
     cat "$PICKER_OUT" 2>/dev/null || true
   else
-    FLOAT_PICKER_MODE=fzf run_picker "$1"
+    FLOAT_PICKER_MODE=fzf run_picker "$@"
   fi
 }
 
@@ -766,7 +771,7 @@ ask() { # ask <prompt>; free text typed by the user
   else fzf_ask "$1"; fi
 }
 
-run_picker() { # run_picker <command-string>; echoes whatever the TUI emitted
+run_picker() { # run_picker <command> [args…]; echoes whatever the TUI emitted
   : > "$PICKER_OUT"
   # A floating, borderless, centred window (see the FloatPicker rule in
   # hypr/windows.lua) — it reads as a launcher panel, not a terminal.
@@ -779,7 +784,7 @@ run_picker() { # run_picker <command-string>; echoes whatever the TUI emitted
     --window-decoration=none \
     --gtk-titlebar=false \
     --mouse-hide-while-typing=true \
-    --command="$1" >/dev/null 2>&1 || true
+    -e "$@" >/dev/null 2>&1 || true
   cat "$PICKER_OUT" 2>/dev/null || true
 }
 

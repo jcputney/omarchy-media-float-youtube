@@ -390,7 +390,7 @@ cmd_resume() { # cmd_resume <on|off|status>
 cmd_browse() { # cmd_browse [--resume]
   local picked id title
   [[ ${1:-} == --resume ]] && export YTF_RESUME=1
-  picked="$(run_menu "$SELF _browse_tui")"
+  picked="$(run_menu "$SELF" _browse_tui)"
   [[ -n $picked ]] || exit 0
 
   [[ $picked == "!auth" ]] && { cmd_auth; exit 0; }
