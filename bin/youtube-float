@@ -243,7 +243,7 @@ continue_rows() {
   # Distinct prefixes, because the two lists run together in one flat list and
   # "saved for later" and "already started" are not the same thing.
   feed_rows "https://www.youtube.com/playlist?list=WL" "$JQ_VIDEOS" 15 "⏱"
-  feed_rows "https://www.youtube.com/feed/history" "$JQ_VIDEOS" 15 "↺"
+  feed_rows "https://www.youtube.com/feed/history" "$JQ_VIDEOS" 15 "↺" | tac
 }
 
 # ── Menus ───────────────────────────────────────────────────────────────────
@@ -258,6 +258,7 @@ tui_main_rows() {
     nav_row "🔥  Recommended for you" "Your YouTube home feed."                       menu recommended
     nav_row "📂  Your playlists"      "Playlists you saved or created."               menu playlists
     nav_row "📺  Your channels"       "Every channel you subscribe to."               menu channels
+    nav_row "📜  History"           "Videos you watched recently."                   menu history
   else
     nav_row "⚠   Sign in to see your feeds" \
       "Subscriptions, Recommended, Watch Later, history and your playlists all need YouTube cookies. Choose this row to print the steps." \
@@ -294,18 +295,34 @@ restore_menu_state() {
   labels=("${saved[@]}")
 }
 
+# The section menu, repeated on every submenu so the left column keeps its
+# navigation entries instead of disappearing once you step into a feed. The
+# current section is left out so choosing it again does not stack a duplicate.
+nav_rows_except() { # nav_rows_except <current-section>
+  local cur="${1:-}"
+  [[ $cur == subscriptions ]] || nav_row "📥  Subscriptions"       "Recent uploads from every channel you follow." menu subscriptions
+  [[ $cur == recommended   ]] || nav_row "🔥  Recommended for you" "Your YouTube home feed."                       menu recommended
+  [[ $cur == playlists     ]] || nav_row "📂  Your playlists"      "Playlists you saved or created."               menu playlists
+  [[ $cur == channels      ]] || nav_row "📺  Your channels"       "Every channel you subscribe to."               menu channels
+  [[ $cur == history       ]] || nav_row "📜  History"             "Videos you watched recently."                 menu history
+  nav_row "🔍  Search YouTube…" "Search all of YouTube by keyword. Works signed out." menu search
+}
+
 tui_submenu_rows() { # tui_submenu_rows <which>; writes rows to stdout
   case "$1" in
     subscriptions) feed_rows "https://www.youtube.com/feed/subscriptions" "$JQ_VIDEOS" ;;
     recommended)   feed_rows "https://www.youtube.com/feed/recommended"   "$JQ_VIDEOS" ;;
     playlists)     feed_rows "https://www.youtube.com/feed/playlists"     "$JQ_PLAYLISTS" ;;
     channels)      feed_rows "https://www.youtube.com/feed/channels"      "$JQ_CHANNELS" ;;
+    history)       feed_rows "https://www.youtube.com/feed/history"       "$JQ_VIDEOS" | tac ;;
     search)
       local q; q="$(ask "Search YouTube…")"
       [[ -n $q ]] || return 1
       feed_rows "ytsearch${FEED_LIMIT}:$q" "$JQ_VIDEOS"
       ;;
   esac
+  # Keep the section menu visible inside every submenu.
+  nav_rows_except "$1"
 }
 
 submenu_label() { # submenu_label <which> [name]
@@ -314,6 +331,7 @@ submenu_label() { # submenu_label <which> [name]
     recommended)   printf 'YouTube · recommended' ;;
     playlists)     printf 'YouTube · playlists' ;;
     channels)      printf 'YouTube · channels' ;;
+    history)       printf 'YouTube · history' ;;
     search)        printf 'YouTube · search' ;;
     channel)       printf 'YouTube · %s' "${2:-channel}" ;;
     playlist)      printf 'YouTube · %s' "${2:-playlist}" ;;
