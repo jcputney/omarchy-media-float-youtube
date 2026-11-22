@@ -41,6 +41,7 @@ Item {
   property var filtered: []
   property var navRows: []
   property var videoRows: []
+  property string focusColumn: "content"
   property string selectionFile: ""
   property string doneFile: ""
   property string promptText: "Pick"
@@ -228,18 +229,24 @@ Item {
 
   function move(delta) {
     if (root.filtered.length === 0) return
-    var n = root.selectedIndex + delta
-    if (n < 0) n = 0
-    if (n > root.filtered.length - 1) n = root.filtered.length - 1
-    root.selectedIndex = n
-    // Scroll whichever column actually holds the selected row.
-    var row = root.filtered[n]
-    var isNav = (row !== null) && /^(menu|signin)(\t|$)/.test(row.value || "")
-    if (isNav && navList.visible) {
+    if (root.navRows.length === 0) root.focusColumn = "content"
+    var idxs = root.columnIndices(root.focusColumn)
+    if (idxs.length === 0) { root.focusColumn = (root.focusColumn === "nav" ? "content" : "nav"); idxs = root.columnIndices(root.focusColumn) }
+    if (idxs.length === 0) return
+    // current position within this column
+    var pos = 0
+    for (var i = 0; i < idxs.length; i++) { if (idxs[i] === root.selectedIndex) { pos = i; break } }
+    // if current not in column, start at first
+    if (idxs.indexOf(root.selectedIndex) === -1) pos = (delta > 0 ? -1 : 0)
+    var np = pos + delta
+    if (np < 0) np = 0
+    if (np > idxs.length - 1) np = idxs.length - 1
+    root.selectedIndex = idxs[np]
+    // scroll
+    if (root.focusColumn === "nav" && navList.visible)
       navList.positionViewAtIndex(root.navSelectedIndex(), ListView.Contain)
-    } else if (list.visible) {
+    else if (list.visible)
       list.positionViewAtIndex(root.contentSelectedIndex(), ListView.Contain)
-    }
   }
 
   function navSelectedIndex() {
@@ -250,6 +257,15 @@ Item {
     for (var i = 0; i < root.navRows.length; i++)
       if (root.navRows[i] === row) return i
     return -1
+  }
+  function columnIndices(col) {
+    var out = []
+    for (var i = 0; i < root.filtered.length; i++) {
+      var v = (root.filtered[i].value || "")
+      var isNav = /^(menu|signin)(\t|$)/.test(v)
+      if (col === "nav" ? isNav : !isNav) out.push(i)
+    }
+    return out
   }
   function contentSelectedIndex() {
     var row = (root.filtered.length > 0 && root.selectedIndex < root.filtered.length)
@@ -470,6 +486,24 @@ Item {
           root.finish(root.freeText
             ? root.filterText
             : (root.current ? (root.current.value || "") : ""))
+          event.accepted = true
+        } else if (event.key === Qt.Key_Left) {
+          if (root.navRows.length > 0) {
+            root.focusColumn = "nav"
+            if (root.columnIndices("nav").indexOf(root.selectedIndex) === -1) {
+              var ni = root.columnIndices("nav")
+              if (ni.length > 0) root.selectedIndex = ni[0]
+            }
+          }
+          event.accepted = true
+        } else if (event.key === Qt.Key_Right) {
+          if (root.videoRows.length > 0 || root.navRows.length === 0) {
+            root.focusColumn = "content"
+            if (root.columnIndices("content").indexOf(root.selectedIndex) === -1) {
+              var ci = root.columnIndices("content")
+              if (ci.length > 0) root.selectedIndex = ci[0]
+            }
+          }
           event.accepted = true
         } else if (event.key === Qt.Key_Down || (event.key === Qt.Key_N && (event.modifiers & Qt.ControlModifier))) {
           root.move(1); event.accepted = true
