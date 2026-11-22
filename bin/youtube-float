@@ -243,7 +243,7 @@ continue_rows() {
   # Distinct prefixes, because the two lists run together in one flat list and
   # "saved for later" and "already started" are not the same thing.
   feed_rows "https://www.youtube.com/playlist?list=WL" "$JQ_VIDEOS" 15 "⏱"
-  feed_rows "https://www.youtube.com/feed/history" "$JQ_VIDEOS" 15 "↺"
+  feed_rows "https://www.youtube.com/feed/history" "$JQ_VIDEOS" 15 "↺" | tac
 }
 
 # ── Menus ───────────────────────────────────────────────────────────────────
@@ -314,7 +314,7 @@ tui_submenu_rows() { # tui_submenu_rows <which>; writes rows to stdout
     recommended)   feed_rows "https://www.youtube.com/feed/recommended"   "$JQ_VIDEOS" ;;
     playlists)     feed_rows "https://www.youtube.com/feed/playlists"     "$JQ_PLAYLISTS" ;;
     channels)      feed_rows "https://www.youtube.com/feed/channels"      "$JQ_CHANNELS" ;;
-    history)       feed_rows "https://www.youtube.com/feed/history"       "$JQ_VIDEOS" ;;
+    history)       feed_rows "https://www.youtube.com/feed/history"       "$JQ_VIDEOS" | tac ;;
     search)
       local q; q="$(ask "Search YouTube…")"
       [[ -n $q ]] || return 1
