@@ -232,7 +232,14 @@ Item {
     if (n < 0) n = 0
     if (n > root.filtered.length - 1) n = root.filtered.length - 1
     root.selectedIndex = n
-    list.positionViewAtIndex(n, ListView.Contain)
+    // Scroll whichever column actually holds the selected row.
+    var row = root.filtered[n]
+    var isNav = (row !== null) && /^(menu|signin)(\t|$)/.test(row.value || "")
+    if (isNav && navList.visible) {
+      navList.positionViewAtIndex(root.navSelectedIndex(), ListView.Contain)
+    } else if (list.visible) {
+      list.positionViewAtIndex(root.contentSelectedIndex(), ListView.Contain)
+    }
   }
 
   function navSelectedIndex() {
@@ -571,7 +578,7 @@ Item {
               delegate: Rectangle {
                 width: navList.width
                 height: Style.space(30)
-                color: index === root.navSelectedIndex() ? root.selectedBackground : "transparent"
+                color: modelData === root.current ? root.selectedBackground : "transparent"
                 radius: Style.space(4)
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
@@ -581,7 +588,7 @@ Item {
                   anchors.rightMargin: Style.spacing.sm
                   text: modelData.label || ""
                   textFormat: Text.PlainText
-                  color: index === root.navSelectedIndex() ? root.selectedText : root.foreground
+                  color: modelData === root.current ? root.selectedText : root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   elide: Text.ElideRight
@@ -613,10 +620,7 @@ Item {
               delegate: Rectangle {
                 width: list.width
                 height: Style.space(30)
-                color: {
-                  var i = root.filtered.indexOf(modelData)
-                  return i === root.selectedIndex ? root.selectedBackground : "transparent"
-                }
+                color: modelData === root.current ? root.selectedBackground : "transparent"
                 radius: Style.space(4)
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
@@ -626,10 +630,7 @@ Item {
                   anchors.rightMargin: Style.spacing.sm
                   text: modelData.label || ""
                   textFormat: Text.PlainText
-                  color: {
-                    var i = root.filtered.indexOf(modelData)
-                    return i === root.selectedIndex ? root.selectedText : root.foreground
-                  }
+                  color: modelData === root.current ? root.selectedText : root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   elide: Text.ElideRight
