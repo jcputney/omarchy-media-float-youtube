@@ -39,6 +39,8 @@ Item {
   property int selectedIndex: 0
   property var rows: []
   property var filtered: []
+  property var navRows: []
+  property var videoRows: []
   property string selectionFile: ""
   property string doneFile: ""
   property string promptText: "Pick"
@@ -211,6 +213,17 @@ Item {
     }
     if (root.selectedIndex >= root.filtered.length)
       root.selectedIndex = Math.max(0, root.filtered.length - 1)
+    // Split the current level into its navigation entries (the section menu:
+    // Subscriptions, Recommended, …) and its content rows (videos, channels,
+    // playlists), so the two can be shown side by side instead of interleaved.
+    var nav = [], vid = []
+    for (var i = 0; i < root.filtered.length; i++) {
+      var v = (root.filtered[i].value || "")
+      if (/^(menu|signin)(\t|$)/.test(v)) nav.push(root.filtered[i])
+      else vid.push(root.filtered[i])
+    }
+    root.navRows = nav
+    root.videoRows = vid
   }
 
   function move(delta) {
@@ -220,6 +233,25 @@ Item {
     if (n > root.filtered.length - 1) n = root.filtered.length - 1
     root.selectedIndex = n
     list.positionViewAtIndex(n, ListView.Contain)
+  }
+
+  function navSelectedIndex() {
+    if (root.navRows.length === 0) return -1
+    var row = (root.filtered.length > 0 && root.selectedIndex < root.filtered.length)
+              ? root.filtered[root.selectedIndex] : null
+    if (!row) return -1
+    for (var i = 0; i < root.navRows.length; i++)
+      if (root.navRows[i] === row) return i
+    return -1
+  }
+  function contentSelectedIndex() {
+    var row = (root.filtered.length > 0 && root.selectedIndex < root.filtered.length)
+              ? root.filtered[root.selectedIndex] : null
+    if (!row) return -1
+    var model = root.navRows.length > 0 ? root.videoRows : root.filtered
+    for (var i = 0; i < model.length; i++)
+      if (model[i] === row) return i
+    return -1
   }
 
   readonly property var current: (root.filtered.length > 0
@@ -456,7 +488,7 @@ Item {
         anchors.centerIn: parent
         // Sized from the screen, not a fixed token: Style.space(1100) is a
         // sensible card on a 1080p panel and a postage stamp on a 4K one.
-        width: Math.min(Math.max(Style.space(900), parent.width * 0.58),
+        width: Math.min(Math.max(Style.space(760), parent.width * 0.50),
                         parent.width - Style.gapsOut * 4)
         // A free-text prompt has no list and no preview, so it shrinks to the
         // two lines it actually draws rather than opening as an empty slab.
@@ -510,7 +542,7 @@ Item {
           Row {
             width: parent.width
             height: parent.height - Style.font.title - Style.spacing.md * 2
-            spacing: Style.spacing.lg
+            spacing: Style.spacing.sm
 
             Text {
               visible: root.freeText
@@ -523,20 +555,23 @@ Item {
               font.pixelSize: Style.font.body
             }
 
+            // Left column: the section menu (Subscriptions, Recommended, …) when the
+            // current level mixes navigation entries with content. It collapses
+            // when there is nothing to navigate, leaving the content list the
+            // room.
             ListView {
-              id: list
-              visible: !root.freeText
-              width: parent.width * 0.52
+              id: navList
+              visible: !root.freeText && root.navRows.length > 0
+              width: visible ? parent.width * 0.22 : 0
               height: parent.height
               clip: true
-              model: root.filtered
-              currentIndex: root.selectedIndex
+              model: root.navRows
+              currentIndex: root.navSelectedIndex()
               boundsBehavior: Flickable.StopAtBounds
-
               delegate: Rectangle {
-                width: list.width
+                width: navList.width
                 height: Style.space(30)
-                color: index === root.selectedIndex ? root.selectedBackground : "transparent"
+                color: index === root.navSelectedIndex() ? root.selectedBackground : "transparent"
                 radius: Style.space(4)
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
@@ -546,14 +581,66 @@ Item {
                   anchors.rightMargin: Style.spacing.sm
                   text: modelData.label || ""
                   textFormat: Text.PlainText
-                  color: index === root.selectedIndex ? root.selectedText : root.foreground
+                  color: index === root.navSelectedIndex() ? root.selectedText : root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   elide: Text.ElideRight
                 }
                 MouseArea {
                   anchors.fill: parent
-                  onClicked: { root.selectedIndex = index; root.finish(modelData.value || "") }
+                  onClicked: {
+                    var i = root.filtered.indexOf(modelData)
+                    if (i >= 0) root.selectedIndex = i
+                    root.finish(modelData.value || "")
+                  }
+                }
+              }
+            }
+
+            // Middle column: the content rows (videos, channels, playlists).
+            ListView {
+              id: list
+              visible: !root.freeText
+              width: root.navRows.length > 0
+                      ? parent.width * 0.40 - Style.spacing.sm
+                      : parent.width * 0.54
+              height: parent.height
+              clip: true
+              model: root.navRows.length > 0 ? root.videoRows : root.filtered
+              currentIndex: root.contentSelectedIndex()
+              boundsBehavior: Flickable.StopAtBounds
+
+              delegate: Rectangle {
+                width: list.width
+                height: Style.space(30)
+                color: {
+                  var i = root.filtered.indexOf(modelData)
+                  return i === root.selectedIndex ? root.selectedBackground : "transparent"
+                }
+                radius: Style.space(4)
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.leftMargin: Style.spacing.sm
+                  anchors.rightMargin: Style.spacing.sm
+                  text: modelData.label || ""
+                  textFormat: Text.PlainText
+                  color: {
+                    var i = root.filtered.indexOf(modelData)
+                    return i === root.selectedIndex ? root.selectedText : root.foreground
+                  }
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  elide: Text.ElideRight
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  onClicked: {
+                    var i = root.filtered.indexOf(modelData)
+                    if (i >= 0) root.selectedIndex = i
+                    root.finish(modelData.value || "")
+                  }
                 }
               }
             }
@@ -561,7 +648,9 @@ Item {
             // Preview: artwork on top, details underneath.
             Column {
               visible: !root.freeText
-              width: parent.width * 0.48 - Style.spacing.lg
+              width: root.navRows.length > 0
+                      ? parent.width * 0.38 - Style.spacing.sm * 2
+                      : parent.width * 0.46 - Style.spacing.sm
               height: parent.height
               spacing: Style.spacing.md
 
@@ -569,15 +658,10 @@ Item {
                 id: art
                 width: parent.width
                 height: parent.height * 0.55
-                // Always a file:// path the tool fetched under its own limits.
-                // A remote URL never reaches this loader, so there is no host
-                // to police here and no request this pane can be made to send.
                 source: root.imagePath
                 visible: source != ""
                 asynchronous: true
                 cache: true
-                // Caps what gets decoded, not just what gets drawn: without it
-                // a small file can still expand into an enormous bitmap.
                 sourceSize.width: 1024
                 sourceSize.height: 1024
                 fillMode: Image.PreserveAspectFit
@@ -593,9 +677,6 @@ Item {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 wrapMode: Text.WordWrap
-                // Give the description less room when there are details to fit
-                // underneath it, so the two share the pane instead of one
-                // pushing the other off the card.
                 maximumLineCount: root.detailText !== "" ? 7 : 12
                 elide: Text.ElideRight
               }
