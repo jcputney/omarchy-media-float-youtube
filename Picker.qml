@@ -578,7 +578,7 @@ Item {
               delegate: Rectangle {
                 width: navList.width
                 height: Style.space(30)
-                color: modelData === root.current ? root.selectedBackground : "transparent"
+                color: index === root.navSelectedIndex() ? root.selectedBackground : "transparent"
                 radius: Style.space(4)
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
@@ -588,7 +588,7 @@ Item {
                   anchors.rightMargin: Style.spacing.sm
                   text: modelData.label || ""
                   textFormat: Text.PlainText
-                  color: modelData === root.current ? root.selectedText : root.foreground
+                  color: index === root.navSelectedIndex() ? root.selectedText : root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   elide: Text.ElideRight
@@ -620,7 +620,7 @@ Item {
               delegate: Rectangle {
                 width: list.width
                 height: Style.space(30)
-                color: modelData === root.current ? root.selectedBackground : "transparent"
+                color: index === root.contentSelectedIndex() ? root.selectedBackground : "transparent"
                 radius: Style.space(4)
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
@@ -630,7 +630,7 @@ Item {
                   anchors.rightMargin: Style.spacing.sm
                   text: modelData.label || ""
                   textFormat: Text.PlainText
-                  color: modelData === root.current ? root.selectedText : root.foreground
+                  color: index === root.contentSelectedIndex() ? root.selectedText : root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   elide: Text.ElideRight
